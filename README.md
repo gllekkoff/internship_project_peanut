@@ -2,13 +2,7 @@
 
 ## Getting Started
 
-### 1. Install dependencies
-
-```bash
-npm install
-```
-
-### 2. Set up environment variables
+### 1. Set up environment variables
 
 ```bash
 cp .env.example .env
@@ -16,18 +10,18 @@ cp .env.example .env
 
 Fill in the values in `.env`.
 
-### 3. Run the app
+### 2. Start the app
 
 ```bash
-npm run dev
+npm run setup
 ```
-
 ---
 
 ## Commands
 
 | Command | Description |
 |---|---|
+| `npn run setup` | Install dependencies, Run tests, Start dev |
 | `npm run dev` | Run in development mode |
 | `npm run build` | Compile TypeScript to `dist/` |
 | `npm run start` | Run compiled production build |
