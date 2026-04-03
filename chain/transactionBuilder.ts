@@ -1,6 +1,6 @@
 import type { Hex, TransactionSerializable } from 'viem';
-import { TokenAmount, TransactionRequest } from '../core/baseTypes.js';
-import type { Address, TransactionReceipt } from '../core/baseTypes.js';
+import { TokenAmount, TransactionRequest, Address } from '../core/baseTypes.js';
+import type { TransactionReceipt } from '../core/baseTypes.js';
 import type { WalletManager } from '../core/walletManager.js';
 import type { ChainClient } from './chainClient.js';
 import { TransactionFailed } from './errorHandling.js';
@@ -103,7 +103,8 @@ export class TransactionBuilder {
     let maxPriorityFee = this._maxPriorityFee;
 
     if (nonce === null) {
-      nonce = await this.client.getNonce(this._to);
+      const senderAddress = new Address(this.wallet.getAddress());
+      nonce = await this.client.getNonce(senderAddress);
     }
 
     if (this._estimateGas || this._fetchGasPrice) {
