@@ -2,7 +2,7 @@
   // Visit https://aka.ms/tsconfig to read more about this file
   "compilerOptions": {
     // File Layout
-    "rootDir": "./src",
+    "rootDir": ".",
     "outDir": "./dist",
 
     // Environment Settings
@@ -38,6 +38,16 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
   },
-  "include": ["src"],
+  "include": [
+    "src",
+    "core",
+    "chain",
+    "exchange",
+    "executor",
+    "inventory",
+    "pricing",
+    "safety",
+    "strategy",
+  ],
   "exclude": ["node_modules", "dist"],
 }
