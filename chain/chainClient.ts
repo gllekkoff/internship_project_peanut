@@ -99,7 +99,7 @@ export class ChainClient {
           const error = e instanceof Error ? e : new Error(String(e));
           lastError = error;
           console.warn(
-            `[ChainClient] ${operation} failed (attempt ${attempt + 1}): ${error.message}`,
+            `[ChainClient] ${operation} failed (attempt ${attempt + 1}): ${redactUrls(error.message)}`,
           );
           if (!isRetryable(error)) {
             throw error;
@@ -238,6 +238,18 @@ export class ChainClient {
       return result.data ?? '0x';
     });
   }
+}
+
+/** Replaces embedded API keys in RPC URLs with [REDACTED] to prevent secret leakage in logs. */
+function redactUrls(message: string): string {
+  return message.replace(/https?:\/\/[^\s"')]+/g, (url) => {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.protocol}//${parsed.hostname}/[REDACTED]`;
+    } catch {
+      return '[REDACTED_URL]';
+    }
+  });
 }
 
 function toViemCallParams(tx: TransactionRequest) {
