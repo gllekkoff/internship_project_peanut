@@ -1,7 +1,7 @@
 import { parseAbi, formatUnits } from 'viem';
 import 'dotenv/config';
 
-export const DEFAULT_RPC = process.env['MEINNET_RPC_URL'] ?? 'https://eth.llamarpc.com';
+export const DEFAULT_RPC = process.env['MAINNET_RPC_URL'] ?? 'https://eth.llamarpc.com';
 
 export const FUNCTION_ABIS = parseAbi([
   // ERC-20

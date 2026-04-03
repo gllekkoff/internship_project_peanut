@@ -199,7 +199,7 @@ async function analyze(
 
     if (traceResult) result['trace'] = traceResult;
 
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(result, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
     return;
   }
 
