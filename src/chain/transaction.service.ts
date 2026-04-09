@@ -1,9 +1,9 @@
 import type { Hex, TransactionSerializable } from 'viem';
-import { TokenAmount, TransactionRequest, Address } from '../core/baseTypes.js';
-import type { TransactionReceipt } from '../core/baseTypes.js';
-import type { WalletManager } from '../core/walletManager.js';
-import type { ChainClient } from './chainClient.js';
-import { TransactionFailed } from './errorHandling.js';
+import { TokenAmount, TransactionRequest, Address } from '@/core/core.types';
+import type { TransactionReceipt } from '@/core/core.types';
+import type { WalletManager } from '@/core/wallet.service';
+import type { ChainClient } from '@/chain/chain.client';
+import { TransactionFailed } from '@/chain/chain.errors';
 
 /** A serialized signed transaction ready to be broadcast. */
 export class SignedTransaction {
@@ -25,13 +25,6 @@ export class TransactionBuilder {
    * Synchronous setters configure the transaction. Async resolution
    * (gas estimation, gas price fetch) happens lazily inside build().
    *
-   * Usage:
-   *   const receipt = await new TransactionBuilder(client, wallet)
-   *     .to(recipient)
-   *     .value(TokenAmount.fromHuman('0.1', 18))
-   *     .withGasEstimate()
-   *     .withGasPrice('high')
-   *     .sendAndWait();
    */
   private _to: Address | null = null;
   private _value: TokenAmount = new TokenAmount(0n, 18, 'ETH');
@@ -65,7 +58,6 @@ export class TransactionBuilder {
     return this;
   }
 
-  /** Explicit nonce — use for replacement transactions or batching. */
   nonce(nonce: number): TransactionBuilder {
     this._nonce = nonce;
     return this;
@@ -76,18 +68,12 @@ export class TransactionBuilder {
     return this;
   }
 
-  /**
-   * Estimate gas at build() time and multiply by buffer.
-   * Buffer defaults to 1.2× — gives headroom for minor state changes between
-   * estimation and inclusion. Uses integer arithmetic, no floats.
-   */
   withGasEstimate(buffer: number = 1.2): TransactionBuilder {
     this._estimateGas = true;
     this._gasBuffer = buffer;
     return this;
   }
 
-  /** Fetch current gas price at build() time and set EIP-1559 fee fields. */
   withGasPrice(priority: 'low' | 'medium' | 'high' = 'medium'): TransactionBuilder {
     this._fetchGasPrice = true;
     this._gasPriority = priority;
@@ -178,7 +164,6 @@ export class TransactionBuilder {
 
   /**
    * Build, sign, broadcast, and wait for the transaction to be mined.
-   * Throws TransactionFailed if the transaction reverts.
    */
   async sendAndWait(timeout: number = 120): Promise<TransactionReceipt> {
     const txHash = await this.send();

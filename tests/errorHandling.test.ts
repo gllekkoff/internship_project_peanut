@@ -6,12 +6,11 @@ import {
   RPCError,
   ReplacementUnderpriced,
   TransactionFailed,
-  isRetryable,
-} from '../chain/errorHandling.js';
-import { TransactionReceipt } from '../core/baseTypes.js';
+} from '@/chain/chain.errors';
+import { isRetryable } from '@/chain/chain.utils';
+import { TransactionReceipt } from '@/core/core.types';
 
-const makeReceipt = () =>
-  new TransactionReceipt('0xabc', 1, false, 21000n, 1000000000n, []);
+const makeReceipt = () => new TransactionReceipt('0xabc', 1, false, 21000n, 1000000000n, []);
 
 describe('Error hierarchy', () => {
   it('ChainError is an instance of Error', () => {

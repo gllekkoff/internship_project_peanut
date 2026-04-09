@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TransactionBuilder, SignedTransaction } from '../chain/transactionBuilder.js';
-import { GasPrice } from '../chain/chainClient.js';
-import { TransactionFailed } from '../chain/errorHandling.js';
-import { Address, TokenAmount, TransactionReceipt } from '../core/baseTypes.js';
-import type { ChainClient } from '../chain/chainClient.js';
-import type { WalletManager } from '../core/walletManager.js';
+import { TransactionBuilder, SignedTransaction } from '@/chain/transaction.service';
+import { GasPrice } from '@/chain/gas.calculator';
+import { TransactionFailed } from '@/chain/chain.errors';
+import { Address, TokenAmount, TransactionReceipt } from '@/core/core.types';
+import type { ChainClient } from '@/chain/chain.client';
+import type { WalletManager } from '@/core/wallet.service';
 
 const ADDR = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 const ADDR2 = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
@@ -18,9 +18,11 @@ function makeClient(overrides: Partial<Record<string, unknown>> = {}): ChainClie
     estimateGas: vi.fn().mockResolvedValue(21000n),
     getGasPrice: vi.fn().mockResolvedValue(mockGasPrice),
     sendTransaction: vi.fn().mockResolvedValue('0xdeadbeef'),
-    waitForReceipt: vi.fn().mockResolvedValue(
-      new TransactionReceipt('0xdeadbeef', 19000000, true, 21000n, 5_000_000_000n, []),
-    ),
+    waitForReceipt: vi
+      .fn()
+      .mockResolvedValue(
+        new TransactionReceipt('0xdeadbeef', 19000000, true, 21000n, 5_000_000_000n, []),
+      ),
     ...overrides,
   } as unknown as ChainClient;
 }
@@ -92,20 +94,16 @@ describe('TransactionBuilder.build()', () => {
 
   it('fetches nonce automatically when not set', async () => {
     const client = makeClient();
-    const builder = new TransactionBuilder(client, makeWallet())
-      .to(new Address(ADDR))
-      .nonce(7);
+    const builder = new TransactionBuilder(client, makeWallet()).to(new Address(ADDR)).nonce(7);
     const tx = await builder.build();
     expect(tx.nonce).toBe(7);
-    expect((client.getNonce as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(client.getNonce as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
   });
 
   it('auto-fetches nonce from client when not provided', async () => {
     const client = makeClient();
-    const tx = await new TransactionBuilder(client, makeWallet())
-      .to(new Address(ADDR))
-      .build();
-    expect((client.getNonce as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    const tx = await new TransactionBuilder(client, makeWallet()).to(new Address(ADDR)).build();
+    expect(client.getNonce as ReturnType<typeof vi.fn>).toHaveBeenCalled();
     expect(tx.nonce).toBe(5);
   });
 
@@ -144,8 +142,8 @@ describe('TransactionBuilder.build()', () => {
       .withGasEstimate()
       .withGasPrice()
       .build();
-    expect((client.estimateGas as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
-    expect((client.getGasPrice as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+    expect(client.estimateGas as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
+    expect(client.getGasPrice as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(1);
   });
 
   it('sets chainId from client', async () => {
@@ -182,14 +180,12 @@ describe('TransactionBuilder.build()', () => {
 describe('TransactionBuilder.sendAndWait()', () => {
   it('throws TransactionFailed when receipt status is false', async () => {
     const client = makeClient({
-      waitForReceipt: vi.fn().mockResolvedValue(
-        new TransactionReceipt('0xdeadbeef', 1, false, 21000n, 1n, []),
-      ),
+      waitForReceipt: vi
+        .fn()
+        .mockResolvedValue(new TransactionReceipt('0xdeadbeef', 1, false, 21000n, 1n, [])),
     });
     await expect(
-      new TransactionBuilder(client, makeWallet())
-        .to(new Address(ADDR))
-        .sendAndWait(),
+      new TransactionBuilder(client, makeWallet()).to(new Address(ADDR)).sendAndWait(),
     ).rejects.toBeInstanceOf(TransactionFailed);
   });
 

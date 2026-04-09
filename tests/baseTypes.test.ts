@@ -5,7 +5,7 @@ import {
   TokenAmount,
   TransactionReceipt,
   TransactionRequest,
-} from '../core/baseTypes.js';
+} from '@/core/core.types';
 
 const ADDR_CHECKSUM = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045';
 const ADDR_LOWER = '0xd8da6bf26964af9d7eed9e03e53415d37aa96045';
@@ -66,7 +66,6 @@ describe('Address', () => {
     expect(new Address(ADDR_LOWER).toString()).toBe(ADDR_CHECKSUM);
   });
 });
-
 
 describe('TokenAmount', () => {
   describe('constructor', () => {
@@ -160,7 +159,6 @@ describe('TokenAmount', () => {
   });
 });
 
-
 describe('Token', () => {
   const addr1 = new Address(ADDR_CHECKSUM);
   const addr2 = new Address(ADDR_OTHER);
@@ -196,7 +194,6 @@ describe('Token', () => {
   });
 });
 
-
 describe('TransactionRequest', () => {
   const addr = new Address(ADDR_CHECKSUM);
   const value = new TokenAmount(1000000000000000000n, 18, 'ETH');
@@ -229,7 +226,6 @@ describe('TransactionRequest', () => {
     expect(dict['nonce']).toBe(0);
   });
 });
-
 
 describe('TransactionReceipt', () => {
   const GAS_USED = 21000n;

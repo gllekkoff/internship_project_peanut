@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { WalletManager } from '../core/walletManager.js';
+import { WalletManager } from '@/core/wallet.service';
 
 // First Hardhat/Foundry default test account — safe to use in tests
 const TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -23,7 +23,9 @@ describe('WalletManager.from_env', () => {
   });
 
   it('throws when env var is not set', () => {
-    expect(() => WalletManager.from_env(TEST_ENV)).toThrow(`${TEST_ENV} environment variable not set`);
+    expect(() => WalletManager.from_env(TEST_ENV)).toThrow(
+      `${TEST_ENV} environment variable not set`,
+    );
   });
 
   it('throws when private key lacks 0x prefix', () => {
@@ -54,7 +56,6 @@ describe('WalletManager.generate', () => {
   });
 });
 
-
 describe('WalletManager - private key exposure', () => {
   let wallet: WalletManager;
 
@@ -81,7 +82,6 @@ describe('WalletManager - private key exposure', () => {
     expect(wallet.toJSON()).toEqual({ address: TEST_ADDRESS });
   });
 });
-
 
 describe('WalletManager.signMessage', () => {
   let wallet: WalletManager;
@@ -133,7 +133,6 @@ describe('WalletManager.signMessage', () => {
   });
 });
 
-
 describe('WalletManager.signTypedData', () => {
   let wallet: WalletManager;
 
@@ -169,7 +168,6 @@ describe('WalletManager.signTypedData', () => {
   });
 });
 
-
 describe('WalletManager.signTransaction', () => {
   let wallet: WalletManager;
 
@@ -195,7 +193,9 @@ describe('WalletManager.signTransaction', () => {
   it('rejects transaction missing "chainId" field', async () => {
     const { chainId: _chainId, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await expect(wallet.signTransaction(tx as any)).rejects.toThrow('missing required field: chainId');
+    await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
+      'missing required field: chainId',
+    );
   });
 
   it('rejects transaction missing "gas" field', async () => {
@@ -207,7 +207,9 @@ describe('WalletManager.signTransaction', () => {
   it('rejects transaction missing "nonce" field', async () => {
     const { nonce: _nonce, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await expect(wallet.signTransaction(tx as any)).rejects.toThrow('missing required field: nonce');
+    await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
+      'missing required field: nonce',
+    );
   });
 
   it('signs valid legacy transaction and returns hex', async () => {
@@ -226,7 +228,6 @@ describe('WalletManager.signTransaction', () => {
     }
   });
 });
-
 
 describe('WalletManager keyfile', () => {
   let tmpDir: string;

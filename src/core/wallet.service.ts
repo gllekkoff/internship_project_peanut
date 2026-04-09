@@ -2,16 +2,16 @@ import { readFile, writeFile } from 'fs/promises';
 import type { Hex, TransactionSerializable, TypedDataDomain, TypedDataParameter } from 'viem';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { Wallet } from 'ethers';
+import { WalletError, SigningError, KeyfileError } from '@/core/core.errors';
 
 export class WalletManager {
   /**
-   * Manages wallet operations: key loading, signing, verification.
+   * Manages wallet operations: key loading, signing, and serialization safety.
    *
-   * Keys can be loaded from:
-   * - Environment variable
-   * - Encrypted keyfile (optional stretch goal)
+   * Keys can be loaded from an environment variable or an encrypted keyfile
+   * (Web3 Secret Storage format, compatible with geth/MetaMask).
    *
-   * CRITICAL: Private key must never appear in logs, errors, or string representations.
+   * CRITICAL: The private key must never appear in logs, errors, or string representations.
    */
   private privateKey: `0x${string}`;
   private address: string;
@@ -25,11 +25,11 @@ export class WalletManager {
   static from_env(env_var: string = 'PRIVATE_KEY'): WalletManager {
     const rawPrivateKey = process.env[env_var];
     if (!rawPrivateKey) {
-      throw new Error(`${env_var} environment variable not set`);
+      throw new WalletError(`${env_var} environment variable not set`);
     }
 
     if (!rawPrivateKey.startsWith('0x')) {
-      throw new Error('Invalid private key format');
+      throw new WalletError('Invalid private key format');
     }
 
     return new WalletManager(rawPrivateKey as `0x${string}`);
@@ -45,9 +45,6 @@ export class WalletManager {
   }
 
   public getAddress(): string {
-    /*
-    Returns checksummed address.
-    */
     if (this.address) {
       return this.address;
     }
@@ -57,11 +54,8 @@ export class WalletManager {
   }
 
   public async signMessage(message: string): Promise<Hex> {
-    /*
-    Sign an arbitrary message (with EIP-191 prefix).
-    */
     if (message.trim() === '') {
-      throw new Error('message must not be empty');
+      throw new SigningError('message must not be empty');
     }
 
     const account = privateKeyToAccount(this.privateKey);
@@ -69,9 +63,7 @@ export class WalletManager {
       const signature = await account.signMessage({ message });
       return signature;
     } catch (e) {
-      throw new Error(
-        `Failed to sign message: ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      throw new SigningError('Failed to sign message', { cause: e });
     }
   }
 
@@ -80,9 +72,6 @@ export class WalletManager {
     types: TypedDataParameter,
     value: TypedDataParameter,
   ): Promise<Hex> {
-    /*
-    Sign EIP-712 typed data (used by many DeFi protocols).
-    */
     const primaryType = Object.keys(types)[0];
     if (!primaryType) {
       throw new Error('types object is empty');
@@ -98,16 +87,11 @@ export class WalletManager {
       });
       return signature;
     } catch (e) {
-      throw new Error(
-        `Failed to sign typed data: ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      throw new SigningError('Failed to sign typed data', { cause: e });
     }
   }
 
   public async signTransaction(transaction: TransactionSerializable): Promise<Hex> {
-    /*
-    Sign a serializable transaction (EIP-1559, legacy, etc.).
-    */
     const requiredFields: (keyof TransactionSerializable)[] = ['to', 'chainId', 'gas', 'nonce'];
     for (const field of requiredFields) {
       if (!(field in transaction)) {
@@ -120,56 +104,45 @@ export class WalletManager {
       const signature = await account.signTransaction(transaction);
       return signature;
     } catch (e) {
-      throw new Error(
-        `Failed to sign transaction: ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      throw new SigningError('Failed to sign transaction', { cause: e });
     }
   }
 
   static async from_keyfile(path: string, password: string): Promise<WalletManager> {
-    /*
-    Load wallet from an encrypted JSON keyfile (geth/clef Web3 Secret Storage format).
-    */
     let raw: string;
     try {
       raw = await readFile(path, 'utf-8');
     } catch (e) {
-      throw new Error(
-        `Failed to read keyfile at "${path}": ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      throw new KeyfileError(`Failed to read keyfile at "${path}"`, { cause: e });
     }
 
     let ethersWallet: Awaited<ReturnType<typeof Wallet.fromEncryptedJson>>;
     try {
       ethersWallet = await Wallet.fromEncryptedJson(raw, password);
-    } catch {
-      // Deliberately omit the ethers error — it may echo the password on bad input
-      throw new Error('Failed to decrypt keyfile: invalid keyfile or wrong password');
+    } catch (e) {
+      // Do not include password or decrypted content in the message.
+      throw new KeyfileError('Failed to decrypt keyfile: invalid keyfile or wrong password', {
+        cause: e,
+      });
     }
 
     return new WalletManager(ethersWallet.privateKey as `0x${string}`);
   }
 
   async to_keyfile(path: string, password: string): Promise<void> {
-    /*
-    Export wallet to an encrypted JSON keyfile (geth/clef Web3 Secret Storage format).
-    */
     const ethersWallet = new Wallet(this.privateKey);
     let json: string;
     try {
       json = await ethersWallet.encrypt(password);
     } catch (e) {
-      throw new Error(
-        `Failed to encrypt keyfile: ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      // Do not include password or key material in the message.
+      throw new KeyfileError('Failed to encrypt keyfile', { cause: e });
     }
 
     try {
       await writeFile(path, json, 'utf-8');
     } catch (e) {
-      throw new Error(
-        `Failed to write keyfile to "${path}": ${e instanceof Error ? e.message : 'unknown error'}`,
-      );
+      throw new KeyfileError(`Failed to write keyfile to "${path}"`, { cause: e });
     }
   }
 

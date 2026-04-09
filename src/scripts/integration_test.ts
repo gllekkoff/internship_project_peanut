@@ -7,10 +7,10 @@ import {
   type TransactionSerializable,
 } from 'viem';
 import { sepolia } from 'viem/chains';
-import { WalletManager } from '../core/walletManager.js';
-import { ChainClient } from '../chain/chainClient.js';
-import { TransactionBuilder, SignedTransaction } from '../chain/transactionBuilder.js';
-import { Address, TokenAmount } from '../core/baseTypes.js';
+import { WalletManager } from '@/core/wallet.service';
+import { ChainClient } from '@/chain/chain.client';
+import { TransactionBuilder, SignedTransaction } from '@/chain/transaction.service';
+import { Address, TokenAmount } from '@/core/core.types';
 import 'dotenv/config';
 
 function requireEnv(name: string): string {
@@ -83,7 +83,9 @@ async function main() {
   const serialized = await wallet.signTransaction(serializable);
   const signed = new SignedTransaction(serialized);
 
-  const recovered = await recoverTransactionAddress({ serializedTransaction: signed.serialized });
+  const recovered = await recoverTransactionAddress({
+    serializedTransaction: signed.serialized as `0x02${string}`, // EIP-1559 tx
+  });
   const sigValid = recovered.toLowerCase() === address.toLowerCase();
 
   console.log(`  Signature valid:           ${sigValid ? '✓' : '✗'}`);

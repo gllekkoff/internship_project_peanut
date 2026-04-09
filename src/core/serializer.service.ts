@@ -11,7 +11,7 @@ export class CanonicalSerializer {
    * - Consistent unicode handling
    */
 
-  static serialize(obj: Record<string, any>): Uint8Array {
+  static serialize(obj: Record<string, unknown>): Uint8Array {
     const json = JSON.stringify(obj, (_, value) => {
       if (typeof value === 'number') {
         if (!Number.isInteger(value)) {
@@ -49,11 +49,11 @@ export class CanonicalSerializer {
     return new TextEncoder().encode(json);
   }
 
-  static hash(obj: Record<string, any>): `0x${string}` {
+  static hash(obj: Record<string, unknown>): `0x${string}` {
     return keccak256(CanonicalSerializer.serialize(obj));
   }
 
-  static verify_determinism(obj: Record<string, any>, iterations: number = 100): boolean {
+  static verify_determinism(obj: Record<string, unknown>, iterations: number = 100): boolean {
     const first = CanonicalSerializer.serialize(obj);
     for (let i = 0; i < iterations; i++) {
       const current = CanonicalSerializer.serialize(obj);

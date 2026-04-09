@@ -1,15 +1,11 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { GasPrice, ChainClient } from '../chain/chainClient.js';
-import { ChainError, RPCError } from '../chain/errorHandling.js';
+import { ChainClient } from '@/chain/chain.client';
+import { GasPrice } from '@/chain/gas.calculator';
+import { ChainError, RPCError } from '@/chain/chain.errors';
 import { mainnet } from 'viem/chains';
 
 describe('GasPrice', () => {
-  const gasPrice = new GasPrice(
-    10_000_000_000n,
-    1_000_000_000n,
-    2_000_000_000n,
-    3_000_000_000n,
-  );
+  const gasPrice = new GasPrice(10_000_000_000n, 1_000_000_000n, 2_000_000_000n, 3_000_000_000n);
 
   it('stores all fee fields', () => {
     expect(gasPrice.baseFee).toBe(10_000_000_000n);

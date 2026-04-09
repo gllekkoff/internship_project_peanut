@@ -1,6 +1,6 @@
-import 'dotenv/config';
+import { config } from '@/core/core.config';
 
-const port = process.env['PORT'] ?? 3000;
+const port = config.port;
 
 console.log(`Running on port ${port}`);
 

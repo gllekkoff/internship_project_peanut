@@ -7,7 +7,8 @@
 
     // Environment Settings
     // See also https://aka.ms/tsconfig/module
-    "module": "nodenext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "target": "ES2022",
     // For nodejs:
     "lib": ["ES2022"],
@@ -37,17 +38,10 @@
     "noUncheckedSideEffectImports": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
+    "paths": {
+      "@/*": ["./src/*", "../tests/*"],
+    },
   },
-  "include": [
-    "src",
-    "core",
-    "chain",
-    "exchange",
-    "executor",
-    "inventory",
-    "pricing",
-    "safety",
-    "strategy",
-  ],
+  "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist"],
 }

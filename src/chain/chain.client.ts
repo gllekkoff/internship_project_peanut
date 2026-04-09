@@ -1,45 +1,10 @@
 import type { Chain, Hex, PublicClient } from 'viem';
 import { TransactionReceiptNotFoundError, createPublicClient, http } from 'viem';
 import { mainnet } from 'viem/chains';
-import { TokenAmount, TransactionReceipt } from '../core/baseTypes.js';
-import type { Address, TransactionRequest } from '../core/baseTypes.js';
-import { isRetryable, sleep } from './errorHandling.js';
-
-export class GasPrice {
-  readonly baseFee: bigint;
-  readonly priorityFeeLow: bigint;
-  readonly priorityFeeMedium: bigint;
-  readonly priorityFeeHigh: bigint;
-
-  constructor(
-    baseFee: bigint,
-    priorityFeeLow: bigint,
-    priorityFeeMedium: bigint,
-    priorityFeeHigh: bigint,
-  ) {
-    this.baseFee = baseFee;
-    this.priorityFeeLow = priorityFeeLow;
-    this.priorityFeeMedium = priorityFeeMedium;
-    this.priorityFeeHigh = priorityFeeHigh;
-  }
-
-  /**
-   * Calculates maxFeePerGas = floor(baseFee * buffer) + priorityFee.
-   *
-   * Buffer defaults to 1.2 to handle up to ~2 blocks of base fee growth
-   * (EIP-1559 allows max 12.5% increase per block).
-   * Uses integer arithmetic — no floats.
-   */
-  getMaxFee(priority: 'low' | 'medium' | 'high' = 'medium', buffer: number = 1.2): bigint {
-    const priorityFees = {
-      low: this.priorityFeeLow,
-      medium: this.priorityFeeMedium,
-      high: this.priorityFeeHigh,
-    };
-    const bufferedBaseFee = (this.baseFee * BigInt(Math.round(buffer * 1000))) / 1000n;
-    return bufferedBaseFee + priorityFees[priority];
-  }
-}
+import { TokenAmount, TransactionReceipt } from '@/core/core.types';
+import type { Address, TransactionRequest } from '@/core/core.types';
+import { isRetryable, redactUrls, sleep, toViemCallParams } from '@/chain/chain.utils';
+import { GasPrice } from '@/chain/gas.calculator';
 
 export class ChainClient {
   private readonly chain: Chain;
@@ -238,31 +203,4 @@ export class ChainClient {
       return result.data ?? '0x';
     });
   }
-}
-
-/** Replaces embedded API keys in RPC URLs with [REDACTED] to prevent secret leakage in logs. */
-function redactUrls(message: string): string {
-  return message.replace(/https?:\/\/[^\s"')]+/g, (url) => {
-    try {
-      const parsed = new URL(url);
-      return `${parsed.protocol}//${parsed.hostname}/[REDACTED]`;
-    } catch {
-      return '[REDACTED_URL]';
-    }
-  });
-}
-
-function toViemCallParams(tx: TransactionRequest) {
-  return {
-    to: tx.to.value as Hex,
-    value: tx.value.raw,
-    ...(tx.data.length > 0 && {
-      data: `0x${Buffer.from(tx.data).toString('hex')}` as Hex,
-    }),
-    ...(tx.nonce !== null && { nonce: tx.nonce }),
-    ...(tx.gasLimit !== null && { gas: tx.gasLimit }),
-    ...(tx.maxFeePerGas !== null && { maxFeePerGas: tx.maxFeePerGas }),
-    ...(tx.maxPriorityFee !== null && { maxPriorityFeePerGas: tx.maxPriorityFee }),
-    chainId: tx.chainId,
-  };
 }

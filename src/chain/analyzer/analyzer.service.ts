@@ -1,13 +1,14 @@
 #!/usr/bin/env tsx
 /**
  * Transaction Analyzer CLI
- * Usage: npx tsx chain/analyzer.ts <tx_hash> [--rpc <url>] [--trace] [--format json]
+ * Usage: npx tsx src/chain/analyzer.service.ts <tx_hash> [--rpc <url>] [--trace] [--format json|text]
  */
 
 import {
   createPublicClient,
   decodeFunctionData,
   decodeEventLog,
+  erc20Abi,
   formatEther,
   formatUnits,
   http,
@@ -16,20 +17,9 @@ import {
 } from 'viem';
 import { mainnet } from 'viem/chains';
 
-import {
-  DEFAULT_RPC,
-  FUNCTION_ABIS,
-  TRANSFER_ABI,
-  ERC20_ABI,
-  TRANSFER_TOPIC,
-  row,
-  gwei,
-  ts,
-  sep,
-  pct,
-} from './analyzer.constants.js';
-
-import type { CallFrame, TransferInfo } from './analyzer.interface.js';
+import { FUNCTION_ABIS, TRANSFER_ABI, TRANSFER_TOPIC } from '@/chain/analyzer/analyzer.constants';
+import { row, gwei, ts, sep, pct } from '@/chain/analyzer/analyzer.utils';
+import type { CallFrame, TransferInfo } from '@/chain/analyzer/analyzer.interfaces';
 
 const tokenCache = new Map<string, { symbol: string; decimals: number }>();
 
@@ -38,8 +28,8 @@ async function getToken(client: PublicClient, address: string) {
   if (hit !== undefined) return hit;
   try {
     const [symbol, decimals] = await Promise.all([
-      client.readContract({ address: address as Hex, abi: ERC20_ABI, functionName: 'symbol' }),
-      client.readContract({ address: address as Hex, abi: ERC20_ABI, functionName: 'decimals' }),
+      client.readContract({ address: address as Hex, abi: erc20Abi, functionName: 'symbol' }),
+      client.readContract({ address: address as Hex, abi: erc20Abi, functionName: 'decimals' }),
     ]);
     const info = { symbol, decimals };
     tokenCache.set(address, info);
@@ -126,13 +116,15 @@ async function analyze(
         transfers.push({
           token: log.address,
           symbol: tokenInfo.symbol,
-          from: args.from as string,
-          to: args.to as string,
+          from: args.from,
+          to: args.to,
           amount: formatUnits(args.value, tokenInfo.decimals),
           rawValue: args.value,
           decimals: tokenInfo.decimals,
         });
-      } catch {}
+      } catch (e) {
+        console.error('[Analyzer] decodeEventLog error:', e);
+      }
     }
   }
 
@@ -268,7 +260,6 @@ async function analyze(
       ? null
       : transfers.find((t) => t.from.toLowerCase() === tx.from.toLowerCase());
     const received = transfers.find((t) => t.to.toLowerCase() === tx.from.toLowerCase());
-
     const soldLabel = isEthIn
       ? `${formatEther(tx.value)} ETH`
       : soldTransfer
@@ -303,6 +294,10 @@ async function analyze(
   console.log('');
 }
 
+import { config } from '@/core/core.config';
+
+const DEFAULT_RPC = config.sepoliaRpcUrl;
+
 const cliArgs = process.argv.slice(2);
 const txHash = cliArgs[0];
 const rpcIdx = cliArgs.indexOf('--rpc');
@@ -312,9 +307,9 @@ const fmtIdx = cliArgs.indexOf('--format');
 const rawFmt = fmtIdx >= 0 ? (cliArgs[fmtIdx + 1] ?? 'text') : 'text';
 const outputFormat: 'text' | 'json' = rawFmt === 'json' ? 'json' : 'text';
 
-if (!txHash?.startsWith('0x')) {
+if (!txHash?.startsWith('0x') || !rpcUrl) {
   console.error(
-    'Usage: npx tsx chain/analyzer.ts <tx_hash> [--rpc <url>] [--trace] [--format json|text]',
+    'Usage: npx tsx src/chain/analyzer.service.ts <tx_hash> [--rpc <url>] [--trace] [--format json|text]',
   );
   process.exit(1);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CanonicalSerializer } from '../core/canonicalSerializer.js';
+import { CanonicalSerializer } from '@/core/serializer.service';
 
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
