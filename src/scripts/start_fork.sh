@@ -27,4 +27,5 @@ fi
 
 anvil \
   --fork-url "$MAINNET_RPC_URL" \
-  --port 8545
+  --port 8545 \
+  --steps-tracing

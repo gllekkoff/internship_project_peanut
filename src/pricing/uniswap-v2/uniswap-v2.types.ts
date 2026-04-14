@@ -1,88 +1,56 @@
-import type { Token, Address } from '../../core/core.types.js';
+import type { Token, Address } from '@/core/core.types';
 
-// ---------------------------------------------------------------------------
-// Raw on-chain reserves as returned by getReserves()
-// ---------------------------------------------------------------------------
-
+/** Raw reserves returned by getReserves(). */
 export interface PairReserves {
   readonly reserve0: bigint;
   readonly reserve1: bigint;
   readonly blockTimestampLast: number;
 }
 
-// ---------------------------------------------------------------------------
-// Immutable snapshot of a Uniswap V2 pair state
-// ---------------------------------------------------------------------------
-
+/** Immutable snapshot of full pair state — address, tokens, reserves, fee. */
 export interface UniswapV2PairState {
   readonly address: Address;
   readonly token0: Token;
   readonly token1: Token;
   readonly reserve0: bigint;
   readonly reserve1: bigint;
-  /**
-   * Fee expressed in basis points.
-   * Standard Uniswap V2 fee is 30 bps (0.30%).
-   */
+  /** Fee in basis points — standard Uniswap V2 is 30 bps (0.30%). */
   readonly feeBps: bigint;
 }
 
-// ---------------------------------------------------------------------------
-// Result of a simulated swap — carries all values in a single structure
-// ---------------------------------------------------------------------------
-
+/** All swap outputs in one structure — amounts, prices, and impact. */
 export interface SwapResult {
-  /** Amount of output token received */
   readonly amountOut: bigint;
-  /** Spot price before the swap */
+  /** Spot price before the swap, scaled by 1e18. */
   readonly spotPriceBefore: bigint;
-  /** Execution price of this specific trade */
+  /** Actual price paid for this trade, scaled by 1e18. */
   readonly executionPrice: bigint;
-  /**
-   * Price impact as a fraction e.g. 100 = 1.00%, 10000 = 100.00%.
-   * Represented as basis points (bps) to avoid floats.
-   */
+  /** Price impact in basis points (100 = 1.00%). */
   readonly priceImpactBps: bigint;
 }
 
-// ---------------------------------------------------------------------------
-// PriceImpactAnalyzer output types
-// ---------------------------------------------------------------------------
-
-/** One row of the impact table — all values for a single trade size. */
+/** One row in the impact table — metrics for a single trade size. */
 export interface ImpactRow {
   readonly amountIn: bigint;
   readonly amountOut: bigint;
-  /** Spot price before the swap, scaled to 18 decimals */
+  /** Spot price before the swap, scaled by 1e18. */
   readonly spotPriceBefore: bigint;
-  /** Execution price of this specific trade, scaled to 18 decimals */
+  /** Actual price paid for this trade, scaled by 1e18. */
   readonly executionPrice: bigint;
-  /** Price impact in basis points (100 = 1.00%) */
+  /** Price impact in basis points (100 = 1.00%). */
   readonly priceImpactBps: bigint;
 }
 
-/**
- * Total cost estimate including gas overhead.
- *
- * All token amounts are in raw units (bigint).
- * All prices are scaled to 18 decimals (divide by 1e18 to get human price).
- */
+/** Full cost breakdown including gas overhead expressed in output-token units. */
 export interface TrueCostResult {
-  /** Raw output before deducting gas cost */
+  /** Token output before deducting gas cost. */
   readonly grossOutput: bigint;
-  /** Gas cost expressed in ETH wei (gasPriceWei * gasEstimate) */
+  /** Gas cost in ETH wei (gasPriceWei × gasEstimate). */
   readonly gasCostEth: bigint;
-  /**
-   * Gas cost converted to output-token units.
-   * Accurate when one side of the pair is WETH; otherwise an approximation
-   * based on the caller-supplied ethPriceInOutputToken.
-   */
+  /** Gas cost converted to output-token units using caller-supplied ETH price. */
   readonly gasCostInOutputToken: bigint;
-  /** grossOutput minus gasCostInOutputToken (floored at 0) */
+  /** grossOutput minus gasCostInOutputToken, floored at 0. */
   readonly netOutput: bigint;
-  /**
-   * Effective execution price after gas: netOutput / amountIn, scaled to 18 decimals.
-   * 0 when the trade is gas-negative (gasCostInOutputToken > grossOutput).
-   */
+  /** netOutput / amountIn scaled by 1e18; 0 when trade is gas-negative. */
   readonly effectivePrice: bigint;
 }

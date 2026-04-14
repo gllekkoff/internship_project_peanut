@@ -187,28 +187,32 @@ describe('WalletManager.signTransaction', () => {
   it('rejects transaction missing "to" field', async () => {
     const { to: _to, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await expect(wallet.signTransaction(tx as any)).rejects.toThrow('missing required field: to');
+    await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
+      'transaction missing field: to',
+    );
   });
 
   it('rejects transaction missing "chainId" field', async () => {
     const { chainId: _chainId, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
-      'missing required field: chainId',
+      'transaction missing field: chainId',
     );
   });
 
   it('rejects transaction missing "gas" field', async () => {
     const { gas: _gas, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await expect(wallet.signTransaction(tx as any)).rejects.toThrow('missing required field: gas');
+    await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
+      'transaction missing field: gas',
+    );
   });
 
   it('rejects transaction missing "nonce" field', async () => {
     const { nonce: _nonce, ...tx } = validTx;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(wallet.signTransaction(tx as any)).rejects.toThrow(
-      'missing required field: nonce',
+      'transaction missing field: nonce',
     );
   });
 

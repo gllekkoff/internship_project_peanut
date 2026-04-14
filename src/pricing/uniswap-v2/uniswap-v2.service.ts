@@ -1,5 +1,6 @@
-import { erc20Abi, parseAbi, decodeFunctionResult, encodeFunctionData } from 'viem';
-import { Token, TokenAmount, TransactionRequest, Address } from '@/core/core.types';
+import { erc20Abi, parseAbi } from 'viem';
+import type { Hex } from 'viem';
+import { Token, Address } from '@/core/core.types';
 import type { ChainClient } from '@/chain/chain.client';
 import { UniswapV2Calculator } from './uniswap-v2.calculator';
 import type { UniswapV2PairState, SwapResult } from './uniswap-v2.types';
@@ -38,20 +39,16 @@ export class UniswapV2Pair {
     this.feeBps = feeBps;
   }
 
-  /** Raw output tokens you receive for selling `amountIn` of `tokenIn` into this pool. */
   getAmountOut(amountIn: bigint, tokenIn: Token): bigint {
     const { reserveIn, reserveOut } = this.resolveReserves(tokenIn);
     return UniswapV2Calculator.getAmountOut(amountIn, reserveIn, reserveOut, this.feeBps);
   }
 
-  /** Minimum raw input needed to receive exactly `amountOut` of `tokenOut`; rounds up to match Solidity. */
   getAmountIn(amountOut: bigint, tokenOut: Token): bigint {
-    // resolveReserves takes tokenIn; we pass the other side because tokenOut is what we receive.
     const { reserveIn, reserveOut } = this.resolveReserves(this.otherToken(tokenOut));
     return UniswapV2Calculator.getAmountIn(amountOut, reserveIn, reserveOut, this.feeBps);
   }
 
-  /** Instantaneous price of `tokenIn` denominated in the other token, scaled by 1e18. Display-only — ignores fees and size. */
   getSpotPrice(tokenIn: Token): bigint {
     const { reserveIn, reserveOut } = this.resolveReserves(tokenIn);
     return UniswapV2Calculator.getSpotPrice(reserveIn, reserveOut);
@@ -119,52 +116,46 @@ export class UniswapV2Pair {
     client: ChainClient,
     feeBps: bigint = 30n,
   ): Promise<UniswapV2Pair> {
-    const zeroValue = new TokenAmount(0n, 18, 'ETH');
-    const makeCallData = (hex: `0x${string}`): Uint8Array => Buffer.from(hex.slice(2), 'hex');
+    const addr = address.value as Hex;
 
-    const call = (target: Address, hex: `0x${string}`) =>
-      client.call(new TransactionRequest(target, zeroValue, makeCallData(hex)));
-
-    const [reservesHex, token0Hex, token1Hex] = await Promise.all([
-      call(address, encodeFunctionData({ abi: PAIR_ABI, functionName: 'getReserves' })),
-      call(address, encodeFunctionData({ abi: PAIR_ABI, functionName: 'token0' })),
-      call(address, encodeFunctionData({ abi: PAIR_ABI, functionName: 'token1' })),
+    const [[reserve0, reserve1], token0Addr, token1Addr] = await Promise.all([
+      client.readContract({ address: addr, abi: PAIR_ABI, functionName: 'getReserves' }),
+      client.readContract({ address: addr, abi: PAIR_ABI, functionName: 'token0' }),
+      client.readContract({ address: addr, abi: PAIR_ABI, functionName: 'token1' }),
     ]);
 
-    const [reserve0, reserve1] = decodeFunctionResult({
-      abi: PAIR_ABI,
-      functionName: 'getReserves',
-      data: reservesHex,
-    });
-
-    const token0Address = new Address(
-      decodeFunctionResult({ abi: PAIR_ABI, functionName: 'token0', data: token0Hex }),
-    );
-    const token1Address = new Address(
-      decodeFunctionResult({ abi: PAIR_ABI, functionName: 'token1', data: token1Hex }),
-    );
-
-    const [symbol0Hex, decimals0Hex, symbol1Hex, decimals1Hex] = await Promise.all([
-      call(token0Address, encodeFunctionData({ abi: erc20Abi, functionName: 'symbol' })),
-      call(token0Address, encodeFunctionData({ abi: erc20Abi, functionName: 'decimals' })),
-      call(token1Address, encodeFunctionData({ abi: erc20Abi, functionName: 'symbol' })),
-      call(token1Address, encodeFunctionData({ abi: erc20Abi, functionName: 'decimals' })),
-    ]);
-
-    const token0 = new Token(
-      token0Address,
-      decodeFunctionResult({ abi: erc20Abi, functionName: 'symbol', data: symbol0Hex }),
-      decodeFunctionResult({ abi: erc20Abi, functionName: 'decimals', data: decimals0Hex }),
-    );
-    const token1 = new Token(
-      token1Address,
-      decodeFunctionResult({ abi: erc20Abi, functionName: 'symbol', data: symbol1Hex }),
-      decodeFunctionResult({ abi: erc20Abi, functionName: 'decimals', data: decimals1Hex }),
-    );
+    const token0Address = new Address(token0Addr);
+    const token1Address = new Address(token1Addr);
 
     if (!token0Address.value || !token1Address.value) {
       throw new InvalidPairError(address.value, 'token0 or token1 returned zero address');
     }
+
+    const [symbol0, decimals0, symbol1, decimals1] = await Promise.all([
+      client.readContract({
+        address: token0Address.value as Hex,
+        abi: erc20Abi,
+        functionName: 'symbol',
+      }),
+      client.readContract({
+        address: token0Address.value as Hex,
+        abi: erc20Abi,
+        functionName: 'decimals',
+      }),
+      client.readContract({
+        address: token1Address.value as Hex,
+        abi: erc20Abi,
+        functionName: 'symbol',
+      }),
+      client.readContract({
+        address: token1Address.value as Hex,
+        abi: erc20Abi,
+        functionName: 'decimals',
+      }),
+    ]);
+
+    const token0 = new Token(token0Address, symbol0, decimals0);
+    const token1 = new Token(token1Address, symbol1, decimals1);
 
     return new UniswapV2Pair(address, token0, token1, reserve0, reserve1, feeBps);
   }

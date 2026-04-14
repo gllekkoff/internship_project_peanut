@@ -1,11 +1,12 @@
 import type { ChainClient } from '@/chain/chain.client';
-import type { Address, Token } from '@/core/core.types';
+import { Address } from '@/core/core.types';
+import type { Token } from '@/core/core.types';
 import { ForkSimulator } from '@/pricing/forkSimulator/fork.service';
 import { MempoolMonitor, type ParsedSwap } from '@/pricing/mempool/mempool.service';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
 import { RouteFinder } from '@/pricing/routing/routing.service';
-import { QuoteError } from './integration.errors';
-import { Quote } from './integration.types';
+import { QuoteError } from './engine.errors';
+import { Quote } from './engine.types';
 
 /** Orchestrates AMM math, routing, fork simulation, and mempool monitoring into a single pricing interface. */
 export class PricingEngine {
@@ -35,11 +36,13 @@ export class PricingEngine {
     this.router = new RouteFinder([...this.pools.values()]);
   }
 
-  /** Re-fetches reserves for a single pool and updates the route graph without reloading all pools. */
+  /** Re-fetches reserves for a single pool and patches the route graph in-place — O(edges), not O(pools). */
   async refreshPool(address: Address): Promise<void> {
     const pair = await UniswapV2Pair.fromChain(address, this.chainClient);
     this.pools.set(pair.address.lower, pair);
-    this.router = new RouteFinder([...this.pools.values()]);
+    if (this.router) {
+      this.router.updatePool(pair);
+    }
   }
 
   /** Finds the best route, verifies it via fork simulation, and returns a Quote; throws QuoteError if simulation fails or no route exists. */
@@ -48,7 +51,6 @@ export class PricingEngine {
     tokenOut: Token,
     amountIn: bigint,
     gasPriceGwei: bigint,
-    routerAddress: Address,
     sender: Address,
   ): Promise<Quote> {
     if (!this.router) throw new QuoteError('No pools loaded — call loadPools first');
@@ -65,7 +67,7 @@ export class PricingEngine {
       throw new QuoteError('No route found', { cause: e });
     }
 
-    const simResult = await this.simulator.simulateRoute(route, amountIn, sender, routerAddress);
+    const simResult = await this.simulator.simulateRoute(route, amountIn, sender);
 
     if (!simResult.success) {
       throw new QuoteError(`Simulation failed: ${simResult.error ?? 'unknown error'}`);

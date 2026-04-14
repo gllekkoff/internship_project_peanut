@@ -3,7 +3,7 @@ import { TokenAmount, TransactionRequest, Address } from '@/core/core.types';
 import type { TransactionReceipt } from '@/core/core.types';
 import type { WalletManager } from '@/core/wallet.service';
 import type { ChainClient } from '@/chain/chain.client';
-import { TransactionFailed } from '@/chain/chain.errors';
+import { ChainError, TransactionFailed } from '@/chain/chain.errors';
 
 /** A serialized signed transaction ready to be broadcast. */
 export class SignedTransaction {
@@ -18,14 +18,8 @@ export class SignedTransaction {
   }
 }
 
+/** Fluent builder for EIP-1559 transactions — setters are synchronous, gas/nonce resolution is lazy inside build(). */
 export class TransactionBuilder {
-  /**
-   * Fluent builder for EIP-1559 transactions.
-   *
-   * Synchronous setters configure the transaction. Async resolution
-   * (gas estimation, gas price fetch) happens lazily inside build().
-   *
-   */
   private _to: Address | null = null;
   private _value: TokenAmount = new TokenAmount(0n, 18, 'ETH');
   private _data: Uint8Array = new Uint8Array(0);
@@ -81,7 +75,7 @@ export class TransactionBuilder {
   }
 
   async build(): Promise<TransactionRequest> {
-    if (this._to === null) throw new Error('to address is required');
+    if (this._to === null) throw new ChainError('to address is required');
 
     let nonce = this._nonce;
     let gasLimit = this._gasLimit;

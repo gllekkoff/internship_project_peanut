@@ -53,7 +53,7 @@ Live mempool monitoring over WebSocket. `MempoolMonitor` subscribes to `eth_subs
 
 Simulation against a local Anvil fork via `eth_call`. `ForkSimulator.simulateRoute` encodes a router `swapExactTokensForTokens` call and sends it as `eth_call` — no transaction is broadcast, no state is mutated. This lets you validate AMM math against the real Solidity bytecode running at a specific block. `compareSimulationVsCalculation` runs both paths and returns the diff.
 
-### `pricing/integration`
+### `pricing/engine`
 
 Top-level orchestrator. `PricingEngine` holds a pool registry (`Map<string, UniswapV2Pair>`), a `RouteFinder`, and a `MempoolMonitor`. `loadPools` hydrates all pairs in parallel. `getQuote` finds the best route, calculates expected output, simulates against the fork, and returns a `Quote` with an `isValid` flag (simulation within 0.1% of calculated). `onMempoolSwap` refreshes affected pools when the mempool sees a swap touching a tracked pair.
 

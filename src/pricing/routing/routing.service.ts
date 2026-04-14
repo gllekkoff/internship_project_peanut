@@ -81,12 +81,34 @@ export class Route {
  *   ethPriceInOutputToken = 2000n * 10n**6n
  */
 export class RouteFinder {
-  readonly pools: readonly UniswapV2Pair[];
+  private readonly _pools: UniswapV2Pair[];
   private readonly graph: RouteGraph;
 
   constructor(pools: UniswapV2Pair[]) {
-    this.pools = pools;
+    this._pools = [...pools];
     this.graph = this.buildGraph();
+  }
+
+  get pools(): readonly UniswapV2Pair[] {
+    return this._pools;
+  }
+
+  /**
+   * Replaces the pool with the same address in-place — updates reserve references in graph edges
+   * without rebuilding the whole graph. O(edges) instead of O(pools).
+   * Silently ignores addresses not already in this finder.
+   */
+  updatePool(updated: UniswapV2Pair): void {
+    const idx = this._pools.findIndex((p) => p.address.lower === updated.address.lower);
+    if (idx === -1) return;
+    this._pools[idx] = updated;
+    for (const edges of this.graph.values()) {
+      for (let i = 0; i < edges.length; i++) {
+        if (edges[i]!.pool.address.lower === updated.address.lower) {
+          edges[i] = { pool: updated, otherToken: edges[i]!.otherToken };
+        }
+      }
+    }
   }
 
   private buildGraph(): RouteGraph {

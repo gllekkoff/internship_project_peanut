@@ -1,24 +1,31 @@
-import type { Chain, Hex, PublicClient } from 'viem';
+import type {
+  Abi,
+  Chain,
+  ContractFunctionArgs,
+  ContractFunctionName,
+  EstimateContractGasParameters,
+  Hex,
+  PublicClient,
+  ReadContractParameters,
+  ReadContractReturnType,
+  SimulateContractParameters,
+  SimulateContractReturnType,
+} from 'viem';
 import { TransactionReceiptNotFoundError, createPublicClient, http } from 'viem';
 import { mainnet } from 'viem/chains';
 import { TokenAmount, TransactionReceipt } from '@/core/core.types';
 import type { Address, TransactionRequest } from '@/core/core.types';
 import { isRetryable, redactUrls, sleep, toViemCallParams } from '@/chain/chain.utils';
 import { GasPrice } from '@/chain/gas.calculator';
+import { ChainError } from '@/chain/chain.errors';
 
+/** Ethereum JSON-RPC client with multi-endpoint failover and exponential backoff retries. */
 export class ChainClient {
   private readonly chain: Chain;
   private readonly maxRetries: number;
   private readonly clients: readonly PublicClient[];
 
-  /**
-   * @param rpcUrls   Ordered list of RPC endpoints. Requests are tried left-to-right;
-   *                  the first one to succeed wins.
-   * @param timeout   Per-request timeout in seconds (default 30).
-   * @param maxRetries Number of full endpoint-cycle retries on transient errors (default 3).
-   * @param chain     Viem chain definition — required for ABI encoding and chain-specific
-   *                  behaviour. Defaults to mainnet.
-   */
+  /** rpcUrls are tried left-to-right; timeout is per-request in seconds; chain defaults to mainnet. */
   constructor(
     rpcUrls: string[],
     timeout: number = 30,
@@ -26,7 +33,7 @@ export class ChainClient {
     chain: Chain = mainnet,
   ) {
     if (rpcUrls.length === 0) {
-      throw new Error('At least one RPC URL is required');
+      throw new ChainError('At least one RPC URL is required');
     }
     this.chain = chain;
     this.maxRetries = maxRetries;
@@ -79,7 +86,9 @@ export class ChainClient {
       }
     }
 
-    throw new Error(`${operation} failed after ${this.maxRetries} attempts: ${lastError.message}`);
+    throw new ChainError(
+      `${operation} failed after ${this.maxRetries} attempts: ${lastError.message}`,
+    );
   }
 
   /** Returns the ETH balance of an address in wei, wrapped as an 18-decimal TokenAmount. */
@@ -156,7 +165,7 @@ export class ChainClient {
       await sleep(pollInterval * 1000);
     }
 
-    throw new Error(`Transaction ${txHash} not confirmed within ${timeout}s`);
+    throw new ChainError(`Transaction ${txHash} not confirmed within ${timeout}s`);
   }
 
   /** Returns the raw transaction object by hash. */
@@ -202,5 +211,45 @@ export class ChainClient {
       const result = await client.call({ ...toViemCallParams(tx), blockTag: block });
       return result.data ?? '0x';
     });
+  }
+
+  /** Calls a read-only contract function by name and returns the decoded result. */
+  async readContract<
+    const TAbi extends Abi | readonly unknown[],
+    TFunctionName extends ContractFunctionName<TAbi, 'pure' | 'view'>,
+    const TArgs extends ContractFunctionArgs<TAbi, 'pure' | 'view', TFunctionName>,
+  >(
+    params: ReadContractParameters<TAbi, TFunctionName, TArgs>,
+  ): Promise<ReadContractReturnType<TAbi, TFunctionName, TArgs>> {
+    return this.withRetry(
+      'readContract',
+      (client) =>
+        client.readContract(params) as Promise<ReadContractReturnType<TAbi, TFunctionName, TArgs>>,
+    );
+  }
+
+  /** Simulates a state-changing contract call via eth_call and returns the decoded result. */
+  async simulateContract<
+    const TAbi extends Abi | readonly unknown[],
+    TFunctionName extends ContractFunctionName<TAbi>,
+    const TArgs extends ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>,
+  >(
+    params: SimulateContractParameters<TAbi, TFunctionName, TArgs>,
+  ): Promise<SimulateContractReturnType<TAbi, TFunctionName, TArgs>> {
+    return this.withRetry(
+      'simulateContract',
+      (client) =>
+        client.simulateContract(params) as Promise<
+          SimulateContractReturnType<TAbi, TFunctionName, TArgs>
+        >,
+    );
+  }
+
+  /** Estimates gas for a contract call using eth_estimateGas. */
+  async estimateContractGas<
+    const TAbi extends Abi | readonly unknown[],
+    TFunctionName extends ContractFunctionName<TAbi>,
+  >(params: EstimateContractGasParameters<TAbi, TFunctionName>): Promise<bigint> {
+    return this.withRetry('estimateContractGas', (client) => client.estimateContractGas(params));
   }
 }

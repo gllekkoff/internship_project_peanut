@@ -1,11 +1,10 @@
 import type { Token } from '@/core/core.types';
 import { InsufficientLiquidityError } from './uniswap-v2.errors';
 
-/** Pure Uniswap V2 AMM math — constant-product formula with configurable fee. No side effects. */
+/** Pure Uniswap V2 AMM math — constant-product formula with configurable fee */
 export class UniswapV2Calculator {
   static readonly PRICE_SCALE = 10n ** 18n;
 
-  /** How many tokens you receive for `amountIn`, after the pool fee (feeBps out of 10_000). */
   static getAmountOut(
     amountIn: bigint,
     reserveIn: bigint,
@@ -23,7 +22,6 @@ export class UniswapV2Calculator {
     return numerator / denominator;
   }
 
-  /** How many tokens you must send to receive exactly `amountOut`; rounds up to match Solidity. */
   static getAmountIn(
     amountOut: bigint,
     reserveIn: bigint,
@@ -39,11 +37,9 @@ export class UniswapV2Calculator {
     const numerator = reserveIn * amountOut * 10_000n;
     const denominator = (reserveOut - amountOut) * (10_000n - feeBps);
 
-    // +1 mirrors Solidity rounding: always round UP to ensure the pool receives enough.
     return numerator / denominator + 1n;
   }
 
-  /** Instantaneous price of reserveOut per reserveIn, scaled by PRICE_SCALE; ignores fees. Display-only — do not use for swap math. */
   static getSpotPrice(reserveIn: bigint, reserveOut: bigint): bigint {
     if (reserveIn <= 0n) throw new InsufficientLiquidityError('reserveIn must be > 0');
     if (reserveOut <= 0n) throw new InsufficientLiquidityError('reserveOut must be > 0');
@@ -51,7 +47,6 @@ export class UniswapV2Calculator {
     return (reserveOut * UniswapV2Calculator.PRICE_SCALE) / reserveIn;
   }
 
-  /** Actual price you got for a trade (amountOut / amountIn), scaled by PRICE_SCALE. Display-only. */
   static getExecutionPrice(amountIn: bigint, amountOut: bigint): bigint {
     if (amountIn <= 0n) throw new InsufficientLiquidityError('amountIn must be > 0');
     if (amountOut <= 0n) throw new InsufficientLiquidityError('amountOut must be > 0');
@@ -64,7 +59,6 @@ export class UniswapV2Calculator {
     if (spotPrice <= 0n) throw new InsufficientLiquidityError('spotPrice must be > 0');
     if (executionPrice <= 0n) throw new InsufficientLiquidityError('executionPrice must be > 0');
 
-    // Multiply by 10_000 to get bps; both prices share the same PRICE_SCALE so it cancels.
     return ((spotPrice - executionPrice) * 10_000n) / spotPrice;
   }
 
