@@ -4,7 +4,7 @@
  * Loads live reserves from mainnet and prints how much slippage each trade size incurs.
  * Usage: npx tsx src/scripts/demo_impact.ts
  */
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { Address } from '@/core/core.types';
 import { ChainClient } from '@/chain/chain.client';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
@@ -40,7 +40,7 @@ function fmtBps(bps: bigint): string {
   return `${(val / 100).toFixed(2)}%`;
 }
 
-const client = new ChainClient([config.mainnetRpcUrl]);
+const client = new ChainClient([config.chain.mainnetRpcUrl]);
 const pair = await UniswapV2Pair.fromChain(USDC_WETH, client);
 
 const usdc = pair.token0; // USDC is token0 in this pair

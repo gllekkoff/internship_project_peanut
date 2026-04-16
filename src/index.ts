@@ -1,6 +1,6 @@
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 
-const port = config.port;
+const port = config.chain.port;
 
 console.log(`Running on port ${port}`);
 

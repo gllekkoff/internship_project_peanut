@@ -7,7 +7,7 @@ import {
   type TransactionSerializable,
 } from 'viem';
 import { sepolia } from 'viem/chains';
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { WalletManager } from '@/core/wallet.service';
 import { ChainClient } from '@/chain/chain.client';
 import { TransactionBuilder, SignedTransaction } from '@/chain/transaction.service';
@@ -16,14 +16,14 @@ import { Address, TokenAmount } from '@/core/core.types';
 const TEST_RECIPIENT = '0x000000000000000000000000000000000000dEaD';
 
 async function main() {
-  if (!config.sepoliaRpcUrl) {
+  if (!config.chain.sepoliaRpcUrl) {
     console.error('Error: SEPOLIA_RPC_URL environment variable not set');
     process.exit(1);
   }
 
   const wallet = WalletManager.from_env('PRIVATE_KEY');
   const address = wallet.getAddress();
-  const client = new ChainClient([config.sepoliaRpcUrl], 30, 3, sepolia);
+  const client = new ChainClient([config.chain.sepoliaRpcUrl], 30, 3, sepolia);
 
   const walletAddress = new Address(address);
   const balance = await client.getBalance(walletAddress);

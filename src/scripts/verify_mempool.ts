@@ -2,10 +2,10 @@
 /**
  * Usage: npx tsx src/scripts/verify_mempool.ts
  */
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { MempoolMonitor } from '@/pricing/mempool/mempool.service';
 
-const wsUrl = config.mainnetRpcUrl.replace('https', 'wss');
+const wsUrl = config.chain.mainnetRpcUrl.replace('https', 'wss');
 
 const monitor = new MempoolMonitor(wsUrl, (swap) => {
   console.log(`[${new Date().toISOString()}] ${swap.method}`);

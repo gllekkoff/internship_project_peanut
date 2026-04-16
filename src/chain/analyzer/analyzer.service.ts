@@ -294,9 +294,9 @@ async function analyze(
   console.log('');
 }
 
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 
-const DEFAULT_RPC = config.sepoliaRpcUrl;
+const DEFAULT_RPC = config.chain.sepoliaRpcUrl;
 
 const cliArgs = process.argv.slice(2);
 const txHash = cliArgs[0];

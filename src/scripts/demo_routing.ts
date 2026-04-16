@@ -4,7 +4,7 @@
  * by net output (gross output minus estimated gas cost converted to output units).
  * Usage: npx tsx src/scripts/demo_routing.ts
  */
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { Address } from '@/core/core.types';
 import { ChainClient } from '@/chain/chain.client';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
@@ -32,7 +32,7 @@ function fmtGas(raw: bigint): string {
   return Number(raw).toLocaleString();
 }
 
-const client = new ChainClient([config.mainnetRpcUrl]);
+const client = new ChainClient([config.chain.mainnetRpcUrl]);
 
 console.log('\nLoading pools from mainnet...');
 const [daiWeth, usdcWeth, daiUsdc] = await Promise.all([

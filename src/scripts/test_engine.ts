@@ -20,7 +20,7 @@
  *   FORK_URL=http://127.0.0.1:8545 npx tsx src/scripts/test_engine.ts
  */
 import { formatUnits } from 'viem';
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { Address, Token } from '@/core/core.types';
 import { ChainClient } from '@/chain/chain.client';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
@@ -275,10 +275,10 @@ async function testForkSimulation(daiWeth: UniswapV2Pair): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('=== Pricing Engine Integration Test ===');
-  console.log(`RPC:  ${config.mainnetRpcUrl.slice(0, 40)}...`);
+  console.log(`RPC:  ${config.chain.mainnetRpcUrl.slice(0, 40)}...`);
   console.log(`Fork: ${FORK_URL ?? '(not set — getQuote will be skipped)'}`);
 
-  const client = new ChainClient([config.mainnetRpcUrl]);
+  const client = new ChainClient([config.chain.mainnetRpcUrl]);
 
   const pools = await testPoolLoading(client);
   if (!pools) {

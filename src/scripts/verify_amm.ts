@@ -6,7 +6,7 @@
  * Usage: npx tsx src/scripts/verify_amm.ts
  */
 import { formatUnits } from 'viem';
-import { config } from '@/core/core.config';
+import { config } from '@/configs/configs.service';
 import { Address } from '@/core/core.types';
 import { ChainClient } from '@/chain/chain.client';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
