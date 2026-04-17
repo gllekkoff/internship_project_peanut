@@ -2,12 +2,13 @@
 /**
  * Arb checker CLI — live DEX vs CEX price comparison via ArbChecker.
  * Fetches real pool data from mainnet and real order book from Binance testnet.
+ * Gas cost is derived from live mainnet gas price + standard Uniswap V2 gas units.
  *
  * Usage:
  *   npx tsx src/scripts/arb_checker.script.ts --pair ETH/USDT --size 2.0
  *
  * Required env: MAINNET_RPC_URL, PRIVATE_KEY
- * Optional env: BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_SECRET (falls back to public order book)
+ * Optional env: BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_SECRET
  */
 import { config } from '@/configs/configs.service';
 import { Address } from '@/core/core.types';
@@ -18,17 +19,17 @@ import { ExchangeClient } from '@/exchange/cexClient/exchange.client';
 import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { PnLEngine } from '@/inventory/pnl/pnl.service';
+import { WalletManager } from '@/core/wallet.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import { ArbChecker } from '@/integration/arbChecker/arbChecker.service';
 import type { ArbCheckResult } from '@/integration/arbChecker/arbChecker.interfaces';
 
-// USDC/WETH pool on Uniswap V2 mainnet — used for ETH/USDT pair approximation.
 const USDC_WETH_POOL = new Address('0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc');
+// Single-hop Uniswap V2 swap gas is stable at ~130k units regardless of trade size.
+const UNISWAP_V2_GAS_UNITS = 130_000n;
 
 const SEP = '═'.repeat(43);
 const LINE = '─'.repeat(24);
-
-// ── Formatting helpers ────────────────────────────────────────────────────────
 
 function fmtUsd(v: bigint, decimals = 2): string {
   const n = Number(v) / Number(PRICE_SCALE);
@@ -41,8 +42,6 @@ function fmtUsd(v: bigint, decimals = 2): string {
 function fmtNum(n: number, decimals = 1): string {
   return n.toFixed(decimals);
 }
-
-// ── Output ────────────────────────────────────────────────────────────────────
 
 function printResult(r: ArbCheckResult, size: number, baseAsset: string): void {
   const d = r.details;
@@ -82,14 +81,24 @@ function printResult(r: ArbCheckResult, size: number, baseAsset: string): void {
 
   console.log(`\nNet PnL estimate: ${fmtNum(r.estimatedNetPnlBps, 1)} bps ${pnlIcon} ${pnlLabel}`);
 
+  const inv = r.inventoryDetails;
+  const SCALE = Number(PRICE_SCALE);
+  const fmtInv = (v: bigint) =>
+    (Number(v) / SCALE).toLocaleString('en-US', { maximumFractionDigits: 4 });
+  const quoteOk = inv.quoteAvailable >= inv.quoteNeeded;
+  const baseOk = inv.baseAvailable >= inv.baseNeeded;
+
   console.log('\nInventory:');
-  console.log(`  ${r.inventoryOk ? '✅ Sufficient' : '❌ Insufficient — check balances'}`);
+  console.log(
+    `  ${inv.quoteVenue} ${inv.quoteAsset.padEnd(5)} ${fmtInv(inv.quoteAvailable).padStart(12)} (need ~${fmtInv(inv.quoteNeeded)}) ${quoteOk ? '✅' : '❌'}`,
+  );
+  console.log(
+    `  ${inv.baseVenue} ${inv.baseAsset.padEnd(5)} ${fmtInv(inv.baseAvailable).padStart(12)} (need ${fmtInv(inv.baseNeeded)}) ${baseOk ? '✅' : '❌'}`,
+  );
 
   console.log(`\nVerdict: ${verdict}`);
   console.log(`${SEP}\n`);
 }
-
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -106,7 +115,6 @@ async function main(): Promise<void> {
 
   const [baseAsset] = pair.split('/') as [string, string];
 
-  // ── Clients ─────────────────────────────────────────────────────────────────
   const chainClient = new ChainClient([config.chain.mainnetRpcUrl]);
   const pricingEngine = new PricingEngine(
     chainClient,
@@ -122,53 +130,77 @@ async function main(): Promise<void> {
     enableRateLimit: config.binance.enableRateLimit,
   });
 
-  // ── Load pool ────────────────────────────────────────────────────────────────
+  const tradeSize = BigInt(Math.round(size * Number(PRICE_SCALE)));
+
   console.log(`\nLoading pool and order book for ${pair}...`);
   const [pool] = await Promise.all([
     UniswapV2Pair.fromChain(USDC_WETH_POOL, chainClient),
     pricingEngine.loadPools([USDC_WETH_POOL]),
   ]);
 
-  // ── Load real balances from Binance ──────────────────────────────────────────
+  const gasPrice = await chainClient.getGasPrice();
+  const gasPriceWei = gasPrice.getMaxFee('medium');
+  const gasCostEth = Number(UNISWAP_V2_GAS_UNITS * gasPriceWei) / 1e18;
+  // getSpotPrice returns USDC per WETH with 6 decimals.
+  const weth = pool.token0.symbol === 'WETH' ? pool.token0 : pool.token1;
+  const ethPriceUsd = Number(pool.getSpotPrice(weth)) / 1e6;
+  const gasCostUsd = gasCostEth * ethPriceUsd;
+
+  console.log(`  Gas price: ${Number(gasPriceWei) / 1e9} gwei → $${gasCostUsd.toFixed(2)}`);
+
   let cexBalances: Record<string, { free: bigint; locked: bigint; total: bigint }> = {};
-  try {
-    await exchangeClient.connect();
-    cexBalances = await exchangeClient.fetchBalance();
-  } catch {
-    console.warn('[warn] Could not fetch Binance balances — using zero inventory');
-  }
+  let walletEth = 0n;
+
+  await Promise.all([
+    exchangeClient
+      .connect()
+      .then(() => exchangeClient.fetchBalance())
+      .then((b) => {
+        cexBalances = b;
+      })
+      .catch(() => console.warn('[warn] Could not fetch Binance balances — using zero')),
+
+    chainClient
+      .getBalance(new Address(WalletManager.from_env('PRIVATE_KEY').getAddress()))
+      .then((b) => {
+        walletEth = b.raw / 10n ** 10n;
+      })
+      .catch(() => console.warn('[warn] Could not fetch wallet balance — using zero')),
+  ]);
 
   const tracker = new InventoryTracker([Venue.BINANCE, Venue.WALLET]);
   tracker.updateFromCex(Venue.BINANCE, cexBalances);
+  tracker.updateFromWallet(Venue.WALLET, { ETH: walletEth });
 
   const pnl = new PnLEngine();
 
-  // ── Trade size in PRICE_SCALE ─────────────────────────────────────────────────
-  const tradeSize = BigInt(Math.round(size * Number(PRICE_SCALE)));
-
-  // Pool tokens may differ from the CEX pair symbols (e.g. WETH vs ETH, USDC vs USDT).
-  // Identify which pool token is the base by matching the CEX base symbol prefix.
+  // Pool token symbols (WETH, USDC) differ from CEX/tracker symbols (ETH, USDT).
   const poolBase = pool.token0.symbol.startsWith(baseAsset)
     ? pool.token0.symbol
     : pool.token1.symbol.startsWith(baseAsset)
       ? pool.token1.symbol
-      : pool.token1.symbol; // fallback: treat token1 as base (WETH in USDC/WETH)
+      : pool.token1.symbol; // fallback for WETH when base is 'ETH'
   const poolQuote = poolBase === pool.token0.symbol ? pool.token1.symbol : pool.token0.symbol;
 
-  // ── ArbChecker ───────────────────────────────────────────────────────────────
+  const CEX_SYMBOL: Record<string, string> = { WETH: 'ETH', WBTC: 'BTC', USDC: 'USDT' };
+  const cexBase = CEX_SYMBOL[poolBase] ?? poolBase;
+  const cexQuote = CEX_SYMBOL[poolQuote] ?? poolQuote;
+
   const checker = new ArbChecker(pricingEngine, exchangeClient, tracker, pnl, [
     {
       pair,
       baseAsset: poolBase,
       quoteAsset: poolQuote,
       cexSymbol: pair,
+      inventoryBaseAsset: cexBase,
+      inventoryQuoteAsset: cexQuote,
       pool,
       tradeSize,
       dexFeeBps: Number(pool.feeBps),
       cexFeeBps: 10,
-      gasCostUsd: 5,
-      baseVenue: Venue.BINANCE,
-      quoteVenue: Venue.BINANCE,
+      gasCostUsd,
+      dexVenue: Venue.WALLET,
+      cexVenue: Venue.BINANCE,
     },
   ]);
 

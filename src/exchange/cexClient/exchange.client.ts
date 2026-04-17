@@ -150,26 +150,6 @@ export class ExchangeClient {
     return result;
   }
 
-  /** Places a LIMIT GTC order — stays open until filled or manually cancelled. Use cancelOrder() to remove it. */
-  async createLimitOrder(
-    symbol: string,
-    side: string,
-    amount: number,
-    price: number,
-  ): Promise<OrderResult> {
-    await this.checkWeight(WEIGHTS.createOrder);
-    console.log(`[ExchangeClient] createLimitOrder ${side} ${amount} ${symbol} @ ${price}`);
-
-    const raw = await this.callExchange<CcxtOrder>(() =>
-      this.exchange.createOrder(symbol, 'limit' as OrderType, side as OrderSide, amount, price),
-    );
-    this.recordWeight(WEIGHTS.createOrder);
-
-    const result = this.normalizeOrder(raw);
-    console.log(`[ExchangeClient] order ${result.id} status=${result.status}`);
-    return result;
-  }
-
   /**
    * Places a market order. Fills immediately at best available price.
    * Prefer createLimitIocOrder for arbitrage — market orders have unpredictable slippage.

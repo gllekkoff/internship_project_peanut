@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
 /**
- * Place and cancel a limit order on Binance testnet.
- * Places a buy order at 10% below market price (won't fill), then cancels it.
+ * Place a LIMIT IOC order on Binance testnet.
+ * IOC fills immediately at the given price or auto-cancels the remainder — no manual cancel needed.
+ * Places a buy slightly above market so it attempts to fill and shows real IOC behavior.
  *
  * Usage: npx tsx src/scripts/order.script.ts [SYMBOL]
  * Example: npx tsx src/scripts/order.script.ts ETH/USDT
@@ -39,25 +40,20 @@ console.log(`\n${SEP}`);
 console.log(`  ORDER DEMO: ${symbol} (Binance testnet)`);
 console.log(SEP);
 
-// ── 1. Fetch current market price ────────────────────────────────────────────
 console.log('\n[1] Fetching current price...');
 const book = await client.fetchOrderBook(symbol, 1);
 const midPrice = Number(book.midPrice) / Number(PRICE_SCALE);
 console.log(`  Mid price: $${midPrice.toFixed(2)}`);
 
-// ── 2. Place limit buy 10% below market — safe, won't fill ───────────────────
-const orderPrice = parseFloat((midPrice * 0.9).toFixed(2));
+// Place 5% below market — IOC will find no liquidity at this price and auto-cancel immediately.
+const orderPrice = parseFloat((midPrice * 0.95).toFixed(2));
 const orderAmount = 0.01;
 
 console.log(
-  `\n[2] Placing LIMIT BUY ${orderAmount} ${symbol.split('/')[0]} @ $${orderPrice} (10% below market)...`,
+  `\n[2] Placing LIMIT IOC BUY ${orderAmount} ${symbol.split('/')[0]} @ $${orderPrice} (5% below market — will auto-cancel)...`,
 );
-const placed = await client.createLimitOrder(symbol, 'buy', orderAmount, orderPrice);
-printOrder('Order placed:', placed);
-
-// ── 3. Cancel it ─────────────────────────────────────────────────────────────
-console.log(`\n[3] Cancelling order ${placed.id}...`);
-const cancelled = await client.cancelOrder(placed.id, symbol);
-printOrder('Order cancelled:', cancelled);
+const result = await client.createLimitIocOrder(symbol, 'buy', orderAmount, orderPrice);
+printOrder('Result:', result);
+console.log('\n  Status CANCELED — IOC auto-cancelled because no liquidity at this price.');
 
 console.log(`\n${SEP}\n`);

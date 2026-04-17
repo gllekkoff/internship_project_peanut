@@ -92,7 +92,7 @@ Top-level pricing orchestrator.
 
 Binance CEX client built on ccxt.
 
-All prices and quantities are `bigint` scaled by `PRICE_SCALE = 1e8`. Includes a sliding-window rate limiter tracking Binance request weights (limit 1100/min). Maps ccxt errors to typed domain errors. Methods: `fetchOrderBook`, `fetchBalance`, `createLimitOrder`, `createLimitIocOrder`, `cancelOrder`, `getTradingFees`.
+All prices and quantities are `bigint` scaled by `PRICE_SCALE = 1e8`. Includes a sliding-window rate limiter tracking Binance request weights (limit 1100/min). Maps ccxt errors to typed domain errors. Methods: `fetchOrderBook`, `fetchBalance`, `createLimitIocOrder`, `cancelOrder`, `getTradingFees`.
 
 ---
 

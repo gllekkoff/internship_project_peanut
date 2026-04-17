@@ -5,7 +5,12 @@ import type { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import type { PnLEngine } from '@/inventory/pnl/pnl.service';
 import type { PricingEngine } from '@/pricing/engine/engine.service';
 import { UnknownPairError, PairConfigError } from './arbChecker.errors';
-import type { ArbCheckResult, ArbCostDetails, PairConfig } from './arbChecker.interfaces';
+import type {
+  ArbCheckResult,
+  ArbCostDetails,
+  ArbInventoryDetails,
+  PairConfig,
+} from './arbChecker.interfaces';
 
 const PRICE_SCALE_NUM = Number(PRICE_SCALE);
 
@@ -16,13 +21,7 @@ const PRICE_SCALE_NUM = Number(PRICE_SCALE);
 export class ArbChecker {
   private readonly pairs: Map<string, PairConfig>;
 
-  /**
-   * @param pricingEngine  Week 2 — owns pool state for DEX price math.
-   * @param exchangeClient Week 3 — fetches live CEX order books.
-   * @param tracker        Week 3 — pre-flight inventory check.
-   * @param pnl            Week 3 — available to the caller for post-trade recording.
-   * @param configs        One entry per tradeable pair.
-   */
+  /** @param configs One entry per tradeable pair — keyed by pair string for O(1) lookup. */
   constructor(
     readonly pricingEngine: PricingEngine,
     readonly exchangeClient: ExchangeClient,
@@ -44,9 +43,10 @@ export class ArbChecker {
         `Pair '${pair}' not configured — register it in ArbChecker constructor`,
       );
 
-    const { pool, tradeSize, dexFeeBps, cexFeeBps, gasCostUsd, baseVenue, quoteVenue } = cfg;
+    const { pool, tradeSize, dexFeeBps, cexFeeBps, gasCostUsd, dexVenue, cexVenue } = cfg;
+    const invBase = cfg.inventoryBaseAsset ?? cfg.baseAsset;
+    const invQuote = cfg.inventoryQuoteAsset ?? cfg.quoteAsset;
 
-    // ── 1. DEX price via AMM math ────────────────────────────────────────────────
     const baseToken =
       pool.token0.symbol === cfg.baseAsset
         ? pool.token0
@@ -71,7 +71,6 @@ export class ArbChecker {
     const quoteOutScaled = (quoteOutNative * PRICE_SCALE) / 10n ** BigInt(quoteToken.decimals);
     const dexPrice = (quoteOutScaled * PRICE_SCALE) / tradeSize;
 
-    // ── 2. CEX order book ────────────────────────────────────────────────────────
     const orderBook = await this.exchangeClient.fetchOrderBook(cfg.cexSymbol, 20);
     const analyzer = new OrderBookAnalyzer(orderBook);
 
@@ -82,9 +81,8 @@ export class ArbChecker {
     const cexBid = orderBook.bestBid[0];
     const cexAsk = orderBook.bestAsk[0];
 
-    // ── 3. Direction & gross gap ─────────────────────────────────────────────────
-    // buy_dex_sell_cex: buy base on DEX, sell on CEX — profitable when cexBid > dexPrice.
-    // buy_cex_sell_dex: buy base on CEX, sell on DEX — profitable when dexPrice > cexAsk.
+    // buy_dex_sell_cex: profitable when cexBid > dexPrice.
+    // buy_cex_sell_dex: profitable when dexPrice > cexAsk.
     const gapBuyCex = dexPrice > 0n ? (Number(cexBid - dexPrice) / Number(dexPrice)) * 10_000 : 0;
     const gapBuyDex = cexAsk > 0n ? (Number(dexPrice - cexAsk) / Number(cexAsk)) * 10_000 : 0;
 
@@ -102,7 +100,6 @@ export class ArbChecker {
       cexSlippageBps = Number(buyWalk.slippageBps);
     }
 
-    // ── 4. Cost breakdown ────────────────────────────────────────────────────────
     const midPriceUsd = Number(orderBook.midPrice) / PRICE_SCALE_NUM;
     const gasCostBps = midPriceUsd > 0 ? (gasCostUsd / (midPriceUsd * tradeSizeNum)) * 10_000 : 0;
     const totalCostBps = dexFeeBps + dexPriceImpactBps + cexFeeBps + cexSlippageBps + gasCostBps;
@@ -118,17 +115,30 @@ export class ArbChecker {
 
     const estimatedNetPnlBps = gapBps - totalCostBps;
 
-    // ── 5. Inventory pre-flight ──────────────────────────────────────────────────
-    // Always check: need quote at quoteVenue (to buy base on DEX) and base at baseVenue (to sell on CEX).
+    // Venues flip with direction: quote is spent at the buy venue, base is sold at the other.
     const quoteNeeded = (tradeSize * dexPrice) / PRICE_SCALE;
+    const quoteVenue = direction === 'buy_cex_sell_dex' ? cexVenue : dexVenue;
+    const baseVenue = direction === 'buy_cex_sell_dex' ? dexVenue : cexVenue;
+
     const invCheck = this.tracker.canExecute(
       quoteVenue,
-      cfg.quoteAsset,
+      invQuote,
       quoteNeeded,
       baseVenue,
-      cfg.baseAsset,
+      invBase,
       tradeSize,
     );
+
+    const inventoryDetails: ArbInventoryDetails = {
+      quoteVenue,
+      quoteAsset: invQuote,
+      quoteAvailable: invCheck.buyVenueAvailable,
+      quoteNeeded: invCheck.buyVenueNeeded,
+      baseVenue,
+      baseAsset: invBase,
+      baseAvailable: invCheck.sellVenueAvailable,
+      baseNeeded: invCheck.sellVenueNeeded,
+    };
 
     return {
       pair,
@@ -142,6 +152,7 @@ export class ArbChecker {
       estimatedCostsBps: totalCostBps,
       estimatedNetPnlBps,
       inventoryOk: invCheck.canExecute,
+      inventoryDetails,
       executable: invCheck.canExecute && estimatedNetPnlBps > 0,
     };
   }

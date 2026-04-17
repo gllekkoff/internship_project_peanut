@@ -40,44 +40,35 @@ function makeLeg(
 
 const engine = new PnLEngine();
 
-// 47 synthetic trades: majority winners, a few losers
-const trades: Array<[number, number, number, number, boolean]> = [
-  // [minsAgo, buyPrice, sellPrice, amount, winner]
-  [2, 2009.5, 2009.8, 0.62, true],
-  [4, 2009.4, 2009.7, 0.6, true],
-  [7, 2009.6, 2009.3, 0.6, false],
-  [10, 2009.2, 2009.8, 0.9, true],
-  [13, 2008.9, 2009.5, 0.75, true],
-  [16, 2009.1, 2009.05, 0.55, false],
-  [19, 2008.7, 2009.4, 0.8, true],
-  [22, 2009.0, 2009.6, 0.7, true],
+// [minsAgo, buyPrice, sellPrice, amount] — buy on DEX (wallet), sell on CEX (Binance).
+// sellPrice > buyPrice = winner; sellPrice < buyPrice = loser.
+const trades: Array<[number, number, number, number]> = [
+  [2, 2009.5, 2009.8, 0.62],
+  [4, 2009.4, 2009.7, 0.6],
+  [7, 2009.6, 2009.3, 0.6],
+  [10, 2009.2, 2009.8, 0.9],
+  [13, 2008.9, 2009.5, 0.75],
+  [16, 2009.1, 2009.0, 0.55],
+  [19, 2008.7, 2009.4, 0.8],
+  [22, 2009.0, 2009.6, 0.7],
 ];
 
-// Fill up to 47 trades by repeating the pattern with slight variation.
-let tradeId = 1;
 for (let i = 0; i < 47; i++) {
-  const [minsAgo, buyPrice, sellPrice, amount, winner] = trades[i % trades.length]!;
-  const jitter = (i * 0.03) % 0.1;
-  const buyVenue = winner ? Venue.WALLET : Venue.BINANCE;
-  const sellVenue = winner ? Venue.BINANCE : Venue.WALLET;
-  const buy = makeLeg(
-    `buy-${tradeId}`,
-    minsAgo + i * 0.5,
-    buyVenue,
-    'buy',
-    amount,
-    buyPrice + jitter,
-  );
+  const [minsAgo, buyPrice, sellPrice, amount] = trades[i % trades.length]!;
+  const shift = (i * 0.03) % 0.5;
+  // Alternate direction: even = buy DEX sell CEX, odd = buy CEX sell DEX.
+  const buyVenue = i % 2 === 0 ? Venue.WALLET : Venue.BINANCE;
+  const sellVenue = i % 2 === 0 ? Venue.BINANCE : Venue.WALLET;
+  const buy = makeLeg(`buy-${i + 1}`, minsAgo + i * 0.5, buyVenue, 'buy', amount, buyPrice + shift);
   const sell = makeLeg(
-    `sell-${tradeId}`,
+    `sell-${i + 1}`,
     minsAgo + i * 0.5,
     sellVenue,
     'sell',
     amount,
-    sellPrice + jitter,
+    sellPrice + shift,
   );
-  engine.record(new ArbRecord(`arb-${tradeId}`, buy.timestamp, buy, sell, scaled(0.05)));
-  tradeId++;
+  engine.record(new ArbRecord(`arb-${i + 1}`, buy.timestamp, buy, sell, scaled(0.05)));
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────────────────
