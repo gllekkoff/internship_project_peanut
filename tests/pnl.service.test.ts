@@ -3,7 +3,7 @@ import { readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { PnLEngine } from '@/inventory/pnl/pnl.service';
 import { ArbRecord, TradeLeg } from '@/inventory/pnl/pnl.interfaces';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 
 function s(n: number): bigint {
   return BigInt(Math.round(n * Number(PRICE_SCALE)));

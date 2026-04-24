@@ -5,11 +5,12 @@
  *   npx tsx src/scripts/rebalancer.script.ts --check
  *   npx tsx src/scripts/rebalancer.script.ts --plan ETH
  */
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import { RebalancePlanner } from '@/inventory/rebalancer/rebalancer.service';
 import type { TransferPlan } from '@/inventory/rebalancer/rebalancer.interfaces';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 // ── Demo data (mirrors the CLI example in the spec) ───────────────────────────
 
@@ -25,7 +26,7 @@ tracker.updateFromWallet(Venue.WALLET, {
   USDT: 1_200_000_000_000n, // 12,000 USDT
 });
 
-const planner = new RebalancePlanner(tracker);
+const planner = new RebalancePlanner(tracker, BINANCE_PROFILE);
 
 // ── Formatting helpers ─────────────────────────────────────────────────────────
 

@@ -1,3 +1,4 @@
+import { PRICE_SCALE } from '@/core/core.constants';
 import type { Venue } from '../tracker/tracker.interfaces';
 
 /** Single execution leg of an arbitrage trade. All monetary values scaled by PRICE_SCALE. */
@@ -55,9 +56,6 @@ export class ArbRecord {
     return (this.buyLeg.price * this.buyLeg.amount) / PRICE_SCALE;
   }
 }
-
-// Co-located here to avoid a circular import — ArbRecord's computed properties depend on it.
-const PRICE_SCALE = 10n ** 8n;
 
 /** Aggregate PnL summary across all recorded trades. */
 export interface PnlSummary {

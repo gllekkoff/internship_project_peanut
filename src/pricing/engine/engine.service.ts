@@ -83,6 +83,22 @@ export class PricingEngine {
     );
   }
 
+  /**
+   * Returns the AMM output amount using pool math only — no fork simulation.
+   * Much faster than getQuote; suitable for signal generation where latency matters.
+   * Throws QuoteError if no pools are loaded or no route exists.
+   */
+  getAmmQuote(tokenIn: Token, tokenOut: Token, amountIn: bigint): bigint {
+    if (!this.router) throw new QuoteError('No pools loaded — call loadPools first');
+    let expectedOutput: bigint;
+    try {
+      [, expectedOutput] = this.router.findBestRoute(tokenIn, tokenOut, amountIn, 0n);
+    } catch (e) {
+      throw new QuoteError('No route found', { cause: e });
+    }
+    return expectedOutput;
+  }
+
   /** Starts the WebSocket mempool subscription. */
   async startMonitor(): Promise<void> {
     await this.monitor.start();

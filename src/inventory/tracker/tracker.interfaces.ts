@@ -46,8 +46,6 @@ export interface SkewResult {
   readonly venues: Record<string, VenueSkew>;
   /** Largest absolute deviation from the ideal split, in percentage points. */
   readonly maxDeviationPct: number;
-  /** True when maxDeviationPct exceeds the rebalance threshold. */
-  readonly needsRebalance: boolean;
 }
 
 /** Pre-flight check result for a two-legged arbitrage execution. */

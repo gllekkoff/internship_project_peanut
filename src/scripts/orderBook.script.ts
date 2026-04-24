@@ -6,8 +6,9 @@
  */
 import { config } from '@/configs/configs.service';
 import { ExchangeClient } from '@/exchange/cexClient/exchange.client';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import { OrderBookAnalyzer } from '@/exchange/orderBook/orderBook.analyzer';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 // ── CLI arg parsing ────────────────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ function empty(): string {
 
 // ── Main ───────────────────────────────────────────────────────────────────────
 
-const client = new ExchangeClient(config.binance);
+const client = new ExchangeClient(config.binance, BINANCE_PROFILE);
 await client.connect();
 
 const book = await client.fetchOrderBook(symbol, depth);

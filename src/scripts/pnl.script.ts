@@ -3,7 +3,7 @@
  * PnL dashboard CLI.
  * Usage: npx tsx src/scripts/pnl.script.ts --summary
  */
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import { ArbRecord, TradeLeg } from '@/inventory/pnl/pnl.interfaces';
 import { PnLEngine } from '@/inventory/pnl/pnl.service';

@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import type { PnlSummary, TradeSummary } from './pnl.interfaces';
 import { ArbRecord } from './pnl.interfaces';
 

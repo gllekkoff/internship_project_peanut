@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 
 function s(n: number): bigint {
   return BigInt(Math.round(n * Number(PRICE_SCALE)));
@@ -97,7 +97,7 @@ describe('InventoryTracker.recordTrade', () => {
 });
 
 describe('InventoryTracker.skew', () => {
-  it('80/20 split shows >= 30% deviation and triggers rebalance', () => {
+  it('80/20 split shows >= 30% deviation', () => {
     const tracker = new InventoryTracker([Venue.BINANCE, Venue.WALLET]);
     tracker.updateFromCex(Venue.BINANCE, {
       ETH: { free: s(2), locked: 0n, total: s(2) },
@@ -107,10 +107,9 @@ describe('InventoryTracker.skew', () => {
     const skew = tracker.skew('ETH');
 
     expect(skew.maxDeviationPct).toBeCloseTo(30, 1);
-    expect(skew.needsRebalance).toBe(true);
   });
 
-  it('50/50 split shows ~0% deviation and does not trigger rebalance', () => {
+  it('50/50 split shows ~0% deviation', () => {
     const tracker = new InventoryTracker([Venue.BINANCE, Venue.WALLET]);
     tracker.updateFromCex(Venue.BINANCE, {
       ETH: { free: s(5), locked: 0n, total: s(5) },
@@ -120,7 +119,6 @@ describe('InventoryTracker.skew', () => {
     const skew = tracker.skew('ETH');
 
     expect(skew.maxDeviationPct).toBeCloseTo(0, 1);
-    expect(skew.needsRebalance).toBe(false);
   });
 
   it('getSkews returns one entry per tracked asset', () => {

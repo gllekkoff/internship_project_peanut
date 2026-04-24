@@ -1,4 +1,4 @@
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE, PRICE_SCALE_NUM } from '@/core/core.constants';
 import type { ExchangeClient } from '@/exchange/cexClient/exchange.client';
 import { OrderBookAnalyzer } from '@/exchange/orderBook/orderBook.analyzer';
 import type { InventoryTracker } from '@/inventory/tracker/tracker.service';
@@ -11,8 +11,6 @@ import type {
   ArbInventoryDetails,
   PairConfig,
 } from './arbChecker.interfaces';
-
-const PRICE_SCALE_NUM = Number(PRICE_SCALE);
 
 /**
  * End-to-end arbitrage check: detect opportunity → estimate costs → validate inventory.

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { RebalancePlanner } from '@/inventory/rebalancer/rebalancer.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 function s(n: number): bigint {
   return BigInt(Math.round(n * Number(PRICE_SCALE)));
@@ -30,7 +31,7 @@ function makeBalancedTracker() {
 
 describe('RebalancePlanner.checkAll', () => {
   it('flags asset with 80/20 split for rebalance', () => {
-    const planner = new RebalancePlanner(makeSkewedTracker());
+    const planner = new RebalancePlanner(makeSkewedTracker(), BINANCE_PROFILE);
     const results = planner.checkAll();
     const eth = results.find((r) => r.asset === 'ETH');
 
@@ -39,7 +40,7 @@ describe('RebalancePlanner.checkAll', () => {
   });
 
   it('does not flag asset with 55/45 split', () => {
-    const planner = new RebalancePlanner(makeBalancedTracker());
+    const planner = new RebalancePlanner(makeBalancedTracker(), BINANCE_PROFILE);
     const results = planner.checkAll();
     const eth = results.find((r) => r.asset === 'ETH');
 
@@ -51,7 +52,7 @@ describe('RebalancePlanner.checkAll', () => {
 describe('RebalancePlanner.plan', () => {
   it('generates a transfer in the correct direction and amount', () => {
     const tracker = makeSkewedTracker();
-    const planner = new RebalancePlanner(tracker);
+    const planner = new RebalancePlanner(tracker, BINANCE_PROFILE);
     const plans = planner.plan('ETH');
 
     expect(plans.length).toBeGreaterThan(0);
@@ -63,12 +64,12 @@ describe('RebalancePlanner.plan', () => {
   });
 
   it('returns empty list when asset is balanced', () => {
-    const planner = new RebalancePlanner(makeBalancedTracker());
+    const planner = new RebalancePlanner(makeBalancedTracker(), BINANCE_PROFILE);
     expect(planner.plan('ETH')).toHaveLength(0);
   });
 
   it('net amount received = amount - fee', () => {
-    const planner = new RebalancePlanner(makeSkewedTracker());
+    const planner = new RebalancePlanner(makeSkewedTracker(), BINANCE_PROFILE);
     const plans = planner.plan('ETH');
 
     for (const p of plans) {
@@ -85,7 +86,7 @@ describe('RebalancePlanner.plan', () => {
     // 0.6 ETH — only 0.1 above min operating balance of 0.5
     tracker.updateFromWallet(Venue.WALLET, { ETH: s(0.6) });
 
-    const planner = new RebalancePlanner(tracker);
+    const planner = new RebalancePlanner(tracker, BINANCE_PROFILE);
     const plans = planner.plan('ETH');
 
     // If any plan exists, the sender must retain >= 0.5 ETH (MIN_OPERATING_BALANCE)
@@ -98,7 +99,7 @@ describe('RebalancePlanner.plan', () => {
 
 describe('RebalancePlanner.estimateCost', () => {
   it('total time is the max of all plan times (parallel execution)', () => {
-    const planner = new RebalancePlanner(makeSkewedTracker());
+    const planner = new RebalancePlanner(makeSkewedTracker(), BINANCE_PROFILE);
     const plans = planner.plan('ETH');
     const cost = planner.estimateCost(plans);
 

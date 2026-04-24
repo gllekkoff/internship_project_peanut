@@ -1,10 +1,6 @@
 import type { InventoryTracker } from '../tracker/tracker.service';
 import { Venue } from '../tracker/tracker.interfaces';
-import {
-  DEFAULT_THRESHOLD_PCT,
-  MIN_OPERATING_BALANCE,
-  TRANSFER_FEES,
-} from './rebalancer.constants';
+import type { VenueProfile } from '@/venues/venue.interfaces';
 import type { CheckResult, EstimateCostResult } from './rebalancer.interfaces';
 import { TransferPlan } from './rebalancer.interfaces';
 
@@ -14,21 +10,21 @@ import { TransferPlan } from './rebalancer.interfaces';
  */
 export class RebalancePlanner {
   private readonly tracker: InventoryTracker;
-  private readonly thresholdPct: number;
+  private readonly profile: VenueProfile;
   private readonly targetRatio: Record<Venue, number>;
 
   /**
-   * @param tracker       Live InventoryTracker instance.
-   * @param thresholdPct  Rebalance when max deviation exceeds this percentage (default 30).
-   * @param targetRatio   Desired fraction per venue (must sum to 1). Defaults to equal split.
+   * @param tracker      Live InventoryTracker instance.
+   * @param profile      Venue profile supplying thresholds, withdrawal fees, and min balances.
+   * @param targetRatio  Desired fraction per venue (must sum to 1). Defaults to equal split.
    */
   constructor(
     tracker: InventoryTracker,
-    thresholdPct: number = DEFAULT_THRESHOLD_PCT,
+    profile: VenueProfile,
     targetRatio?: Partial<Record<Venue, number>>,
   ) {
     this.tracker = tracker;
-    this.thresholdPct = thresholdPct;
+    this.profile = profile;
 
     const venues = Object.values(Venue);
     const equalShare = 1 / venues.length;
@@ -39,13 +35,14 @@ export class RebalancePlanner {
 
   /**
    * Returns a summary of skew status for every tracked asset.
-   * Only maxDeviationPct and needsRebalance are surfaced — no transfer detail.
+   * needsRebalance is computed here against the profile threshold — the tracker is data-only.
    */
   checkAll(): CheckResult[] {
-    return this.tracker.getSkews().map(({ asset, maxDeviationPct, needsRebalance }) => ({
+    const threshold = this.profile.inventory.rebalanceThresholdPct;
+    return this.tracker.getSkews().map(({ asset, maxDeviationPct }) => ({
       asset,
       maxDeviationPct,
-      needsRebalance,
+      needsRebalance: maxDeviationPct >= threshold,
     }));
   }
 
@@ -59,10 +56,10 @@ export class RebalancePlanner {
    */
   plan(asset: string): TransferPlan[] {
     const skew = this.tracker.skew(asset);
-    if (skew.maxDeviationPct < this.thresholdPct) return [];
+    if (skew.maxDeviationPct < this.profile.inventory.rebalanceThresholdPct) return [];
 
-    const feeInfo = TRANSFER_FEES[asset];
-    const minOp = MIN_OPERATING_BALANCE[asset] ?? 0n;
+    const feeInfo = this.profile.inventory.withdrawalFees[asset];
+    const minOp = this.profile.inventory.minOperatingBalance[asset] ?? 0n;
 
     // Compute target amount per venue and the resulting surplus/deficit.
     const total = skew.total;

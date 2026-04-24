@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { OrderBookAnalyzer } from '@/exchange/orderBook/orderBook.analyzer';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import type { OrderBook } from '@/exchange/cexClient/exchange.interfaces';
 
 function s(n: number): bigint {

@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 
 // ── Mock ccxt (same pattern as exchange.client.test.ts) ───────────────────────
@@ -31,6 +31,7 @@ import { ArbChecker } from '@/integration/arbChecker/arbChecker.service';
 import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
 import { Address, Token } from '@/core/core.types';
 import type { PricingEngine } from '@/pricing/engine/engine.service';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 function getMock() {
   return (globalThis as Record<string, unknown>)['__ccxtMockArb'] as Record<string, ReturnType<typeof vi.fn>>;
@@ -78,10 +79,10 @@ function makeOrderBook(bid: number, ask: number) {
 
 function makeTracker(quoteAmount: number, baseAmount: number): InventoryTracker {
   const tracker = new InventoryTracker([Venue.BINANCE, Venue.WALLET]);
-  // Asset names must match pool token symbols (USDC/WETH) used in PairConfig.
+  // buy_dex_sell_cex: quote (USDC) at dexVenue (WALLET), base (WETH) at cexVenue (BINANCE).
+  tracker.updateFromWallet(Venue.WALLET, { USDC: s(quoteAmount) });
   tracker.updateFromCex(Venue.BINANCE, {
-    USDC: { free: s(quoteAmount), locked: 0n, total: s(quoteAmount) },
-    WETH: { free: s(baseAmount),  locked: 0n, total: s(baseAmount) },
+    WETH: { free: s(baseAmount), locked: 0n, total: s(baseAmount) },
   });
   return tracker;
 }
@@ -91,7 +92,7 @@ function makeChecker(
   tracker: InventoryTracker,
   tradeSize = 2.0,
 ): ArbChecker {
-  const client = new ExchangeClient({ apiKey: 'k', secret: 's', sandbox: true, options: {}, enableRateLimit: false });
+  const client = new ExchangeClient({ apiKey: 'k', secret: 's', sandbox: true, options: {}, enableRateLimit: false }, BINANCE_PROFILE);
   const pricingEngine = { loadPools: vi.fn(), refreshPool: vi.fn() } as unknown as PricingEngine;
 
   return new ArbChecker(pricingEngine, client, tracker, new PnLEngine(), [
@@ -105,8 +106,8 @@ function makeChecker(
       dexFeeBps: 30,
       cexFeeBps: 10,
       gasCostUsd: 5,
-      baseVenue: Venue.BINANCE,
-      quoteVenue: Venue.BINANCE,
+      dexVenue: Venue.WALLET,
+      cexVenue: Venue.BINANCE,
     },
   ]);
 }

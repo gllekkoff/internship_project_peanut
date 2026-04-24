@@ -1,5 +1,4 @@
 import type { AssetBalance } from '@/exchange/cexClient/exchange.interfaces';
-import { REBALANCE_THRESHOLD_PCT } from './tracker.constants';
 import type {
   Balance,
   CanExecuteResult,
@@ -128,13 +127,13 @@ export class InventoryTracker {
     const map = this.requireVenueMap(venue);
 
     if (side === 'buy') {
-      this.adjustFree(map, baseAsset, baseAmount);
-      this.adjustFree(map, quoteAsset, -quoteAmount);
+      this.adjustFree(map, venue, baseAsset, baseAmount);
+      this.adjustFree(map, venue, quoteAsset, -quoteAmount);
     } else {
-      this.adjustFree(map, baseAsset, -baseAmount);
-      this.adjustFree(map, quoteAsset, quoteAmount);
+      this.adjustFree(map, venue, baseAsset, -baseAmount);
+      this.adjustFree(map, venue, quoteAsset, quoteAmount);
     }
-    this.adjustFree(map, feeAsset, -fee);
+    this.adjustFree(map, venue, feeAsset, -fee);
   }
 
   /**
@@ -165,13 +164,7 @@ export class InventoryTracker {
       venues[venue] = { amount, pct, deviationPct };
     }
 
-    return {
-      asset,
-      total,
-      venues,
-      maxDeviationPct,
-      needsRebalance: maxDeviationPct >= REBALANCE_THRESHOLD_PCT,
-    };
+    return { asset, total, venues, maxDeviationPct };
   }
 
   /**
@@ -194,15 +187,10 @@ export class InventoryTracker {
     return map;
   }
 
-  /** Adds `delta` to the free balance of `asset`, creating the entry if absent. */
-  private adjustFree(map: Map<string, Balance>, asset: string, delta: bigint): void {
+  /** Adds `delta` to the free balance of `asset` at `venue`, creating the entry if absent. */
+  private adjustFree(map: Map<string, Balance>, venue: Venue, asset: string, delta: bigint): void {
     const existing = map.get(asset);
-    const current = existing ?? {
-      venue: [...this.balances.keys()][0]!,
-      asset,
-      free: 0n,
-      locked: 0n,
-    };
+    const current = existing ?? { venue, asset, free: 0n, locked: 0n };
     map.set(asset, { ...current, free: current.free + delta });
   }
 }

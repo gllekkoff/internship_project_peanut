@@ -1,4 +1,4 @@
-import { PRICE_SCALE } from '../cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import type { OrderBook } from '../cexClient/exchange.interfaces';
 import type { Fill, WalkResult } from './orderBook.interfaces';
 

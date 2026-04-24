@@ -1,5 +1,6 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import { PRICE_SCALE, WEIGHT_LIMIT } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 // ── ccxt mock ─────────────────────────────────────────────────────────────────
 // Must use a regular function (not arrow) so `new binance()` works as a constructor.
@@ -51,7 +52,7 @@ describe('ExchangeClient.fetchOrderBook', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getMock()['fetchTime'].mockResolvedValue(Date.now());
-    client = new ExchangeClient(VALID_CONFIG);
+    client = new ExchangeClient(VALID_CONFIG, BINANCE_PROFILE);
   });
 
   it('order book has required fields', async () => {
@@ -100,7 +101,7 @@ describe('ExchangeClient.fetchBalance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getMock()['fetchTime'].mockResolvedValue(Date.now());
-    client = new ExchangeClient(VALID_CONFIG);
+    client = new ExchangeClient(VALID_CONFIG, BINANCE_PROFILE);
   });
 
   it('zero-balance assets excluded from result', async () => {
@@ -135,7 +136,7 @@ describe('ExchangeClient.createLimitIocOrder', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getMock()['fetchTime'].mockResolvedValue(Date.now());
-    client = new ExchangeClient(VALID_CONFIG);
+    client = new ExchangeClient(VALID_CONFIG, BINANCE_PROFILE);
   });
 
   it('returns fill qty, avg price, and fees', async () => {
@@ -168,12 +169,12 @@ describe('ExchangeClient rate limiter', () => {
     getMock()['fetchTime'].mockResolvedValue(Date.now());
     getMock()['fetchOrderBook'].mockResolvedValue(makeRawBook(2000, 2001));
 
-    const client = new ExchangeClient(VALID_CONFIG);
+    const client = new ExchangeClient(VALID_CONFIG, BINANCE_PROFILE);
 
     // Pre-fill weight log via private field to simulate exhausted budget.
     const now = Date.now();
     (client as unknown as Record<string, unknown>)['weightLog'] = Array.from(
-      { length: WEIGHT_LIMIT },
+      { length: BINANCE_PROFILE.rateLimit.weightLimit },
       () => ({ time: now, weight: 1 }),
     );
 

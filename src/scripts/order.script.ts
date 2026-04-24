@@ -11,8 +11,9 @@
  */
 import { config } from '@/configs/configs.service';
 import { ExchangeClient } from '@/exchange/cexClient/exchange.client';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import type { OrderResult } from '@/exchange/cexClient/exchange.interfaces';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 const symbol = (process.argv[2] ?? 'ETH/USDT').toUpperCase();
 const SEP = '═'.repeat(43);
@@ -33,7 +34,7 @@ function printOrder(label: string, o: OrderResult): void {
   console.log(`  Filled:    ${(Number(o.amountFilled) / Number(PRICE_SCALE)).toFixed(4)}`);
 }
 
-const client = new ExchangeClient(config.binance);
+const client = new ExchangeClient(config.binance, BINANCE_PROFILE);
 await client.connect();
 
 console.log(`\n${SEP}`);

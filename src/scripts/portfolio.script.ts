@@ -11,9 +11,11 @@ import { Address } from '@/core/core.types';
 import { WalletManager } from '@/core/wallet.service';
 import { ChainClient } from '@/chain/chain.client';
 import { ExchangeClient } from '@/exchange/cexClient/exchange.client';
-import { PRICE_SCALE } from '@/exchange/cexClient/exchange.constants';
+import { PRICE_SCALE } from '@/core/core.constants';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
+import { RebalancePlanner } from '@/inventory/rebalancer/rebalancer.service';
+import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
 
 const SEP = '═'.repeat(50);
 const LINE = '─'.repeat(50);
@@ -27,7 +29,7 @@ function fmtAmt(v: bigint, decimals = 4): string {
 
 // ── Clients ───────────────────────────────────────────────────────────────────
 const chainClient = new ChainClient([config.chain.mainnetRpcUrl]);
-const exchangeClient = new ExchangeClient(config.binance);
+const exchangeClient = new ExchangeClient(config.binance, BINANCE_PROFILE);
 
 const wallet = WalletManager.from_env('PRIVATE_KEY');
 const walletAddress = new Address(wallet.getAddress());
@@ -100,24 +102,25 @@ if (walletEth === 0n) {
 }
 
 // ── Skew report ───────────────────────────────────────────────────────────────
-const skews = tracker.getSkews();
-const needsRebalance = skews.filter((s) => s.needsRebalance);
+const planner = new RebalancePlanner(tracker, BINANCE_PROFILE);
+const checks = planner.checkAll();
+const needsRebalance = checks.filter((c) => c.needsRebalance);
 
 console.log(`\n${LINE}`);
 console.log('  Skew');
 console.log(LINE);
 
-if (skews.length === 0) {
+if (checks.length === 0) {
   console.log('  No assets tracked');
 } else {
-  for (const s of skews) {
-    const flag = s.needsRebalance ? '⚠️ ' : '✅ ';
-    console.log(`  ${flag} ${s.asset.padEnd(6)} max deviation: ${s.maxDeviationPct.toFixed(1)}%`);
+  for (const c of checks) {
+    const flag = c.needsRebalance ? '⚠️ ' : '✅ ';
+    console.log(`  ${flag} ${c.asset.padEnd(6)} max deviation: ${c.maxDeviationPct.toFixed(1)}%`);
   }
 }
 
 if (needsRebalance.length > 0) {
-  console.log(`\n  ⚠️  ${needsRebalance.map((s) => s.asset).join(', ')} need rebalancing`);
+  console.log(`\n  ⚠️  ${needsRebalance.map((c) => c.asset).join(', ')} need rebalancing`);
 }
 
 console.log(`\n${SEP}\n`);
