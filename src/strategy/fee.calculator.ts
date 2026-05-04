@@ -12,7 +12,7 @@ export interface FeeStructureParams {
 export class FeeCalculator {
   readonly cexTakerBps: number;
   readonly dexSwapBps: number;
-  readonly gasCost: bigint;
+  gasCost: bigint;
 
   constructor(params: FeeStructureParams = {}) {
     this.cexTakerBps = params.cexTakerBps ?? 10;

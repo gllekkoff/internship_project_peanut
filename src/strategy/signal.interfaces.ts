@@ -89,6 +89,8 @@ export class Signal {
 /** Configuration for SignalGenerator thresholds and DEX pricing integration. */
 export interface SignalGeneratorConfig {
   readonly minSpreadBps?: number;
+  /** Target trade notional in USD, scaled by PRICE_SCALE. ETH size is computed per-tick as tradeSizeUsd / cexAsk. */
+  readonly tradeSizeUsd?: bigint;
   /** Minimum net profit to emit a signal, scaled by PRICE_SCALE. */
   readonly minProfit?: bigint;
   /** Maximum position size in quote currency, scaled by PRICE_SCALE. */
@@ -102,6 +104,10 @@ export interface SignalGeneratorConfig {
   readonly pairTokens?: Map<string, readonly [Token, Token]>;
   /** Required for PricingEngine.getQuote fork simulation calls. */
   readonly senderAddress?: Address;
+  /** Estimated gas units for one Uniswap V2 swap — used to convert live gas price to USD cost. */
+  readonly swapGasUnits?: bigint;
+  /** Pool address shown in no-signal logs for diagnostics. */
+  readonly poolAddress?: string;
 }
 
 /** Live price snapshot from both venues, used internally during signal generation. */
@@ -112,4 +118,6 @@ export interface PriceLevels {
   readonly dexBuyPrice: bigint;
   /** Quote you receive per base unit on DEX (PRICE_SCALE). */
   readonly dexSellPrice: bigint;
+  /** Actual base size computed from tradeSizeUsd / cexAsk, scaled by PRICE_SCALE. */
+  readonly size: bigint;
 }

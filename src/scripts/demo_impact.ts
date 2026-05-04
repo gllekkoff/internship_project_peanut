@@ -40,7 +40,7 @@ function fmtBps(bps: bigint): string {
   return `${(val / 100).toFixed(2)}%`;
 }
 
-const client = new ChainClient([config.chain.mainnetRpcUrl]);
+const client = new ChainClient([config.chain.rpcUrl]);
 const pair = await UniswapV2Pair.fromChain(USDC_WETH, client);
 
 const usdc = pair.token0; // USDC is token0 in this pair

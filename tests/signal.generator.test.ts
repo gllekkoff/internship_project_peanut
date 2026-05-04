@@ -10,6 +10,9 @@ function s(n: number): bigint {
   return BigInt(Math.round(n * Number(PRICE_SCALE)));
 }
 
+const ETH_TOKEN = { address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' as const, decimals: 18, symbol: 'ETH' };
+const USDT_TOKEN = { address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' as const, decimals: 6, symbol: 'USDT' };
+
 function makeOrderBook(bid: number, ask: number) {
   const bidScaled = s(bid);
   const askScaled = s(ask);
@@ -42,80 +45,108 @@ function makeTracker(ethBinance = 10, usdtBinance = 50_000, ethWallet = 10) {
   return tracker;
 }
 
+/**
+ * Makes a pricing engine mock where:
+ * - selling ETH→USDT yields `dexSellPremiumBps` bps above the CEX ask price
+ * - buying ETH←USDT yields `dexBuyDiscountBps` bps below the CEX bid price
+ *
+ * The mock intercepts `getAmmQuote(tokenIn, tokenOut, amountIn)` and returns
+ * a proportionally adjusted amount based on which direction is being quoted.
+ */
+function makePricingEngine(dexSellPremiumBps = 100, dexBuyDiscountBps = 0) {
+  return {
+    getAmmQuote: vi.fn((tokenIn: typeof ETH_TOKEN, _tokenOut: typeof USDT_TOKEN, amountIn: bigint): bigint => {
+      if (tokenIn.symbol === 'ETH') {
+        // ETH→USDT: sell path — return more USDT than at CEX mid to create a sell premium.
+        // amountIn is in ETH raw units (18 decimals). Return USDT raw units (6 decimals).
+        // ~2000 USDC/ETH * (1 + premium). Scale: 1 ETH = 1e18 wei, 1 USDC = 1e6.
+        const ethAmount = Number(amountIn) / 1e18;
+        const usdcOut = ethAmount * 2000 * (1 + dexSellPremiumBps / 10_000);
+        return BigInt(Math.round(usdcOut * 1e6));
+      } else {
+        // USDT→ETH: buy path — return more ETH than at CEX mid to create a buy discount.
+        const usdcAmount = Number(amountIn) / 1e6;
+        const ethOut = (usdcAmount / 2000) * (1 + dexBuyDiscountBps / 10_000);
+        return BigInt(Math.round(ethOut * 1e18));
+      }
+    }),
+  };
+}
+
 function makeGenerator(
   bid: number,
   ask: number,
-  overrides: { minSpreadBps?: number; minProfit?: bigint; cooldownMs?: number } = {},
+  overrides: {
+    minSpreadBps?: number;
+    minProfit?: bigint;
+    cooldownMs?: number;
+    dexSellPremiumBps?: number;
+    dexBuyDiscountBps?: number;
+  } = {},
 ) {
   const exchangeClient = makeExchangeClient(bid, ask);
-  const fees = new FeeCalculator({ cexTakerBps: 10, dexSwapBps: 30, gasCost: s(2) });
+  const fees = new FeeCalculator({ cexTakerBps: 10, dexSwapBps: 30, gasCost: 0n });
   const tracker = makeTracker();
+  const pricingEngine = makePricingEngine(overrides.dexSellPremiumBps, overrides.dexBuyDiscountBps);
+  const pairTokens = new Map([['ETH/USDT', [ETH_TOKEN, USDT_TOKEN] as const]]);
   return {
-    generator: new SignalGenerator(exchangeClient as never, null, tracker, fees, {
+    generator: new SignalGenerator(exchangeClient as never, pricingEngine as never, tracker, fees, {
       minSpreadBps: overrides.minSpreadBps ?? 50,
       minProfit: overrides.minProfit ?? s(1),
       cooldownMs: overrides.cooldownMs ?? 0,
+      tradeSizeUsd: 18n * PRICE_SCALE,
+      pairTokens,
+      senderAddress: '0x0000000000000000000000000000000000000001',
     }),
     exchangeClient,
+    pricingEngine,
   };
 }
 
 describe('SignalGenerator.generate — profitable opportunity', () => {
-  beforeEach(() => {
-    // Pin Math.random so stub DEX prices are deterministic: 100bps sell premium, 40bps buy discount.
-    vi.spyOn(Math, 'random').mockReturnValue(0.667);
-  });
-  afterEach(() => vi.restoreAllMocks());
-
-  it('generates signal when spread exceeds breakeven', async () => {
-    // DEX stub prices: mid±0.5%, so buy@1005, sell@1008 relative to CEX mid ~2000
-    // CEX bid=2000, ask=2001. Stub dexSell = mid*1.008 ≈ 2009, dexBuy = mid*1.005 ≈ 2005.
-    // spread_b (buy DEX sell CEX): (2000 - 2005) / 2005 < 0 → no
-    // spread_a (buy CEX sell DEX): (2009 - 2001) / 2001 ≈ 40 bps — below default 50 bps
-    // Use wider spread: bid=1900, ask=1901 so dexSell ≈ 1913 vs ask 1901 → ~63 bps
-    const { generator } = makeGenerator(1900, 1901, { minSpreadBps: 50, minProfit: s(0.01) });
-    const signal = await generator.generate('ETH/USDT', s(1));
+  it('generates signal when DEX sell price is above CEX ask by enough bps', async () => {
+    // 100 bps DEX sell premium → buyCexSellDex spread ≈ 100 bps > minSpreadBps=50.
+    const { generator } = makeGenerator(2000, 2001, { minSpreadBps: 50, minProfit: s(0.01), dexSellPremiumBps: 100 });
+    const signal = await generator.generate('ETH/USDT');
     expect(signal).not.toBeNull();
     expect(signal!.expectedNetPnl).toBeGreaterThan(0n);
   });
 });
 
 describe('SignalGenerator.generate — no opportunity', () => {
-  it('returns null when spread is too small', async () => {
-    // CEX bid=2000, ask=2001. Stub DEX prices centred on mid=2000.5, so
-    // dexSell = 2000.5*1.008 ≈ 2016 relative to scaled — but minSpreadBps=500 makes it impossible.
-    const { generator } = makeGenerator(2000, 2001, { minSpreadBps: 500 });
-    const signal = await generator.generate('ETH/USDT', s(1));
+  it('returns null when DEX spread is below minSpreadBps', async () => {
+    // 5 bps DEX premium but minSpreadBps=200 → no signal.
+    const { generator } = makeGenerator(2000, 2001, { minSpreadBps: 200, dexSellPremiumBps: 5 });
+    const signal = await generator.generate('ETH/USDT');
     expect(signal).toBeNull();
   });
 });
 
 describe('SignalGenerator — cooldown', () => {
-  beforeEach(() => vi.spyOn(Math, 'random').mockReturnValue(0.667));
-  afterEach(() => vi.restoreAllMocks());
-
-  it('second call within cooldown returns null', async () => {
-    const { generator } = makeGenerator(1900, 1901, {
+  it('second call within cooldown returns null even if spread is good', async () => {
+    const { generator } = makeGenerator(2000, 2001, {
       minSpreadBps: 50,
       minProfit: s(0.01),
+      dexSellPremiumBps: 100,
       cooldownMs: 60_000,
     });
-    const first = await generator.generate('ETH/USDT', s(1));
+    const first = await generator.generate('ETH/USDT');
     expect(first).not.toBeNull();
-    const second = await generator.generate('ETH/USDT', s(1));
+    const second = await generator.generate('ETH/USDT');
     expect(second).toBeNull();
   });
 });
 
 describe('SignalGenerator — direction selection', () => {
-  beforeEach(() => vi.spyOn(Math, 'random').mockReturnValue(0.667));
-  afterEach(() => vi.restoreAllMocks());
-
-  it('picks BUY_CEX_SELL_DEX when that spread is larger', async () => {
-    // CEX bid=2000, ask=2001. Stub: dexSell = mid*1.008 >> dexBuy = mid*1.005.
-    // spread_a (buy CEX, sell DEX) uses dexSell vs ask → should be positive and win.
-    const { generator } = makeGenerator(1900, 1901, { minSpreadBps: 10, minProfit: s(0.001) });
-    const signal = await generator.generate('ETH/USDT', s(1));
+  it('picks BUY_CEX_SELL_DEX when DEX sell premium exceeds buy discount', async () => {
+    // Sell premium 100 bps >> buy discount 10 bps → BUY_CEX_SELL_DEX wins.
+    const { generator } = makeGenerator(2000, 2001, {
+      minSpreadBps: 10,
+      minProfit: s(0.001),
+      dexSellPremiumBps: 100,
+      dexBuyDiscountBps: 10,
+    });
+    const signal = await generator.generate('ETH/USDT');
     expect(signal?.direction).toBe(Direction.BUY_CEX_SELL_DEX);
   });
 });

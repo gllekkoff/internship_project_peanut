@@ -1,8 +1,12 @@
 node_modules/
 dist/
+logs/
 
 .env
 .env.local
 .env.*.local
 
 .claude/
+graphify-out/
+
+docs/*.md

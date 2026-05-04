@@ -32,7 +32,7 @@ function fmtGas(raw: bigint): string {
   return Number(raw).toLocaleString();
 }
 
-const client = new ChainClient([config.chain.mainnetRpcUrl]);
+const client = new ChainClient([config.chain.rpcUrl]);
 
 console.log('\nLoading pools from mainnet...');
 const [daiWeth, usdcWeth, daiUsdc] = await Promise.all([

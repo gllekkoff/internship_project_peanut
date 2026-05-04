@@ -36,11 +36,11 @@ async function main(): Promise<void> {
   console.log(`\n${SEP}`);
   console.log('  Pricing Engine — Integration Demo');
   console.log(SEP);
-  console.log(`  RPC:  ${config.chain.mainnetRpcUrl.slice(0, 45)}...`);
+  console.log(`  RPC:  ${config.chain.rpcUrl.slice(0, 45)}...`);
   console.log(`  Fork: ${FORK_URL ?? '(not set — getQuote will be skipped)'}`);
   console.log(LINE);
 
-  const client = new ChainClient([config.chain.mainnetRpcUrl]);
+  const client = new ChainClient([config.chain.rpcUrl]);
   const engine = new PricingEngine(client, FORK_URL ?? 'http://127.0.0.1:8545', WS_URL);
 
   // ── 1. Load pools ────────────────────────────────────────────────────────────

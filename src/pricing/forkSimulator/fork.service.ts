@@ -3,18 +3,20 @@ import { Address } from '@/core/core.types';
 import type { Token } from '@/core/core.types';
 import type { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
 import type { Route } from '@/pricing/routing/routing.service';
-import { ROUTER_ABI, DEFAULT_DEADLINE_OFFSET, SIMULATION_AMOUNT_OUT_MIN } from './fork.constants';
+import {
+  ROUTER_ABI,
+  DEFAULT_DEADLINE_OFFSET,
+  SIMULATION_AMOUNT_OUT_MIN,
+  UNISWAP_V2_ROUTER,
+} from './fork.constants';
 import type { ComparisonResult, SimulationResult } from './fork.interfaces';
-
-// Uniswap V2 Router02 on mainnet — used for getAmountsOut view calls in compareSimulationVsCalculation.
-const DEFAULT_ROUTER = new Address('0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D');
 
 /** Simulates swaps and routes against a local Anvil/Hardhat fork via eth_call — no tx is broadcast. */
 export class ForkSimulator {
   private readonly client: PublicClient;
   private readonly router: Address;
 
-  constructor(forkUrl: string, router: Address = DEFAULT_ROUTER) {
+  constructor(forkUrl: string, router: Address = UNISWAP_V2_ROUTER) {
     this.client = createPublicClient({ transport: http(forkUrl) });
     this.router = router;
   }

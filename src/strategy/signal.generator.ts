@@ -1,18 +1,19 @@
 import { randomUUID } from 'crypto';
 import { PRICE_SCALE } from '@/core/core.constants';
+import { makeLogger } from '@/core/core.logger';
 import type { Address, Token } from '@/core/core.types';
 import type { ChainClient } from '@/chain/chain.client';
 import type { ExchangeClient } from '@/exchange/cexClient/exchange.client';
+import type { OrderBook } from '@/exchange/cexClient/exchange.interfaces';
+import { OrderBookAnalyzer } from '@/exchange/orderBook/orderBook.analyzer';
 import type { PricingEngine } from '@/pricing/engine/engine.service';
 import type { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import type { FeeCalculator } from '@/strategy/fee.calculator';
-import { GasPriceFetchError } from '@/strategy/signal.errors';
 import { Direction, Signal } from '@/strategy/signal.interfaces';
 import type { SignalGeneratorConfig, PriceLevels } from '@/strategy/signal.interfaces';
 
-// Estimated gas units for a single Uniswap V2 swap (base + 1 hop).
-const SWAP_GAS_UNITS = 150_000n;
+const log = makeLogger('Signal');
 
 /**
  * Generates validated arb signals by comparing live CEX and DEX prices against fee thresholds.
@@ -20,13 +21,17 @@ const SWAP_GAS_UNITS = 150_000n;
  */
 export class SignalGenerator {
   private readonly minSpreadBps: number;
+  private readonly tradeSizeUsd: bigint;
   private readonly minProfit: bigint;
   private readonly maxPosition: bigint;
   private readonly signalTtlMs: number;
   private readonly cooldownMs: number;
   private readonly pairTokens: Map<string, readonly [Token, Token]> | undefined;
   private readonly senderAddress: Address | undefined;
+  private readonly swapGasUnits: bigint;
+  private readonly poolAddress: string | undefined;
   private readonly lastSignalTime: Map<string, number> = new Map();
+  private gasCache: { value: bigint; ts: number } | null = null;
 
   constructor(
     private readonly exchangeClient: ExchangeClient,
@@ -37,32 +42,47 @@ export class SignalGenerator {
     private readonly chainClient?: ChainClient,
   ) {
     this.minSpreadBps = config.minSpreadBps ?? 50;
+    this.tradeSizeUsd = config.tradeSizeUsd ?? 18n * PRICE_SCALE;
     this.minProfit = config.minProfit ?? 5n * PRICE_SCALE;
     this.maxPosition = config.maxPosition ?? 10_000n * PRICE_SCALE;
     this.signalTtlMs = config.signalTtlMs ?? 5_000;
     this.cooldownMs = config.cooldownMs ?? 2_000;
     this.pairTokens = config.pairTokens;
     this.senderAddress = config.senderAddress;
+    this.swapGasUnits = config.swapGasUnits ?? 150_000n;
+    this.poolAddress = config.poolAddress;
   }
 
   /**
-   * Attempts to generate a signal for the given pair and size.
+   * Attempts to generate a signal for the given pair.
    * Returns a Signal when an opportunity clears all fee and inventory checks, null otherwise.
-   * `size` is the base asset trade amount scaled by PRICE_SCALE (e.g. 1_00_000_000n = 1.0).
+   * Pass `book` to skip the REST order book fetch — used when called from a WebSocket depth handler.
    */
-  async generate(pair: string, size: bigint): Promise<Signal | null> {
+  async generate(pair: string, book?: OrderBook): Promise<Signal | null> {
     if (this.inCooldown(pair)) return null;
+    const signal = await this.generateCore(pair, book);
+    if (signal) this.lastSignalTime.set(pair, Date.now());
+    return signal;
+  }
 
-    const prices = await this.fetchPrices(pair, size);
+  /**
+   * Same as generate() but skips cooldown and does not update the cooldown timer.
+   * Use for re-validating a signal immediately before execution without consuming a tick.
+   */
+  async peek(pair: string, book?: OrderBook): Promise<Signal | null> {
+    return this.generateCore(pair, book);
+  }
+
+  private async generateCore(pair: string, book?: OrderBook): Promise<Signal | null> {
+    const prices = await this.fetchPrices(pair, book);
     if (prices === null) return null;
 
-    const { cexBid, cexAsk, dexBuyPrice, dexSellPrice } = prices;
+    const { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size } = prices;
 
-    // Spread in bps as a float ratio — bigint division would truncate sub-integer spreads.
-    // spread_a: buy on CEX (pay ask), sell on DEX — profitable when dexSell > cexAsk.
-    const spreadABps = cexAsk > 0n ? (Number(dexSellPrice - cexAsk) * 10_000) / Number(cexAsk) : 0;
-    // spread_b: buy on DEX (pay dexBuy), sell on CEX (receive bid) — profitable when cexBid > dexBuy.
-    const spreadBBps =
+    // Float ratio — bigint division would truncate sub-integer spreads to zero on liquid pairs.
+    const buyCexSellDexBps =
+      cexAsk > 0n ? (Number(dexSellPrice - cexAsk) * 10_000) / Number(cexAsk) : 0;
+    const buyDexSellCexBps =
       dexBuyPrice > 0n ? (Number(cexBid - dexBuyPrice) * 10_000) / Number(dexBuyPrice) : 0;
 
     let direction: Direction;
@@ -70,17 +90,27 @@ export class SignalGenerator {
     let cexPrice: bigint;
     let dexPrice: bigint;
 
-    if (spreadABps > spreadBBps && spreadABps >= this.minSpreadBps) {
+    if (buyCexSellDexBps > buyDexSellCexBps && buyCexSellDexBps >= this.minSpreadBps) {
       direction = Direction.BUY_CEX_SELL_DEX;
-      spreadBps = spreadABps;
+      spreadBps = buyCexSellDexBps;
       cexPrice = cexAsk;
       dexPrice = dexSellPrice;
-    } else if (spreadBBps >= this.minSpreadBps) {
+    } else if (buyDexSellCexBps >= this.minSpreadBps) {
       direction = Direction.BUY_DEX_SELL_CEX;
-      spreadBps = spreadBBps;
+      spreadBps = buyDexSellCexBps;
       cexPrice = cexBid;
       dexPrice = dexBuyPrice;
     } else {
+      this.logNoSignal(
+        pair,
+        cexBid,
+        cexAsk,
+        dexBuyPrice,
+        dexSellPrice,
+        size,
+        buyCexSellDexBps,
+        buyDexSellCexBps,
+      );
       return null;
     }
 
@@ -124,7 +154,6 @@ export class SignalGenerator {
       withinLimits,
     });
 
-    this.lastSignalTime.set(pair, Date.now());
     return signal;
   }
 
@@ -133,41 +162,45 @@ export class SignalGenerator {
     return Date.now() - (this.lastSignalTime.get(pair) ?? 0) < this.cooldownMs;
   }
 
-  /**
-   * Fetches live gas price from chain and converts it to a USD gas cost estimate.
-   * Uses the CEX ETH bid price to convert ETH gas cost to USD.
-   * Falls back to null (caller uses FeeCalculator static gasCost) on any error.
-   */
+  /** Cached for 30 s — falls back to null so FeeCalculator uses its static gasCost. */
   private async fetchLiveGasCost(ethPriceUsd: bigint): Promise<bigint | null> {
     if (!this.chainClient || ethPriceUsd === 0n) return null;
+    const GAS_CACHE_TTL_MS = 30_000;
+    if (this.gasCache && Date.now() - this.gasCache.ts < GAS_CACHE_TTL_MS) {
+      return (this.gasCache.value * ethPriceUsd) / 10n ** 18n;
+    }
     try {
       const gasPrice = await this.chainClient.getGasPrice();
-      // maxFee in wei (base + medium priority)
       const maxFeeWei = gasPrice.getMaxFee('medium');
-      // gasCostWei = maxFeePerGas × estimatedGasUnits
-      const gasCostWei = maxFeeWei * SWAP_GAS_UNITS;
-      // Convert wei → ETH (18 decimals) → USD (PRICE_SCALE)
-      // gasCostUsd = gasCostWei * ethPriceUsd / 1e18
-      return (gasCostWei * ethPriceUsd) / (10n ** 18n * PRICE_SCALE);
+      const gasCostWei = maxFeeWei * this.swapGasUnits;
+      this.gasCache = { value: gasCostWei, ts: Date.now() };
+      return (gasCostWei * ethPriceUsd) / 10n ** 18n;
     } catch (e) {
-      console.warn(
-        `[SignalGenerator] gas price fetch failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      new GasPriceFetchError(e instanceof Error ? e.message : String(e)); // surfaced for observability
+      log.warn(`Gas price fetch failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }
   }
 
-  /**
-   * Fetches CEX order book and DEX prices.
-   * Uses PricingEngine.getAmmQuote (pool math only, no fork simulation) when pairTokens
-   * + senderAddress are configured; falls back to a random mid-price stub otherwise.
-   */
-  private async fetchPrices(pair: string, size: bigint): Promise<PriceLevels | null> {
+  /** Uses `book` directly when provided (WebSocket path), otherwise fetches via REST. */
+  private async fetchPrices(pair: string, book?: OrderBook): Promise<PriceLevels | null> {
     try {
-      const ob = await this.exchangeClient.fetchOrderBook(pair, 5);
-      const cexBid = ob.bestBid[0];
-      const cexAsk = ob.bestAsk[0];
+      const ob = book ?? (await this.exchangeClient.fetchOrderBook(pair, 5));
+
+      // Derive size from the top-of-book ask before walking — no hardcoded price assumptions.
+      const topAsk = ob.bestAsk[0];
+      if (topAsk === 0n) return null;
+      const size = (this.tradeSizeUsd * PRICE_SCALE) / topAsk;
+      const sizeNum = Number(size) / Number(PRICE_SCALE);
+
+      const analyzer = new OrderBookAnalyzer(ob);
+      const bidWalk = analyzer.walkTheBook('sell', sizeNum);
+      const askWalk = analyzer.walkTheBook('buy', sizeNum);
+
+      // Not enough depth on either side to fill the full trade — skip signal.
+      if (!bidWalk.fullyFilled || !askWalk.fullyFilled) return null;
+
+      const cexBid = bidWalk.avgPrice;
+      const cexAsk = askWalk.avgPrice;
 
       let dexBuyPrice: bigint;
       let dexSellPrice: bigint;
@@ -194,25 +227,14 @@ export class SignalGenerator {
         dexBuyPrice =
           baseReceivedScaled > 0n ? (quoteAmountScaled * PRICE_SCALE) / baseReceivedScaled : 0n;
       } else {
-        // STUB: randomised DEX prices to simulate varying spread conditions for demo/testing.
-        // sellPremiumBps: 0–150 bps above mid  → sometimes profitable, sometimes not.
-        // buyDiscountBps: 0–80 bps below mid   → occasional buy-side opportunity.
-        const mid = (cexBid + cexAsk) / 2n;
-        const sellPremiumBps = BigInt(Math.floor(Math.random() * 151)); // 0–150 bps
-        const buyDiscountBps = BigInt(Math.floor(Math.random() * 81)); // 0–80 bps
-        dexSellPrice = (mid * (10_000n + sellPremiumBps)) / 10_000n;
-        dexBuyPrice = (mid * (10_000n - buyDiscountBps)) / 10_000n;
-        const fmt = (v: bigint) => `$${(Number(v) / Number(PRICE_SCALE)).toFixed(2)}`;
-        console.log(
-          `[SignalGenerator] DEX sim: sell=${fmt(dexSellPrice)} (+${sellPremiumBps}bps)` +
-            ` buy=${fmt(dexBuyPrice)} (-${buyDiscountBps}bps)` +
-            ` mid=${fmt(mid)}`,
+        throw new Error(
+          `No DEX pricing available for ${pair} — pricingEngine or token config missing`,
         );
       }
 
-      return { cexBid, cexAsk, dexBuyPrice, dexSellPrice };
-    } catch {
-      return null;
+      return { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size };
+    } catch (e) {
+      throw e instanceof Error ? e : new Error(`fetchPrices failed for ${pair}: ${String(e)}`);
     }
   }
 
@@ -242,5 +264,41 @@ export class SignalGenerator {
         this.inventory.getAvailable(Venue.BINANCE, base) >= size
       );
     }
+  }
+
+  private logNoSignal(
+    pair: string,
+    cexBid: bigint,
+    cexAsk: bigint,
+    dexBuyPrice: bigint,
+    dexSellPrice: bigint,
+    size: bigint,
+    buyCexSellDexBps: number,
+    buyDexSellCexBps: number,
+  ): void {
+    const s = Number(PRICE_SCALE);
+    const [base = ''] = pair.split('/');
+    const sizeNum = Number(size) / s;
+
+    const px = (v: bigint) => (Number(v) / s).toFixed(6);
+    const bps = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}bps`;
+
+    const cexMid = (cexBid + cexAsk) / 2n;
+    const cexSpreadBps = cexMid > 0n ? (Number(cexAsk - cexBid) * 10_000) / Number(cexMid) : 0;
+
+    const dexMid = (dexBuyPrice + dexSellPrice) / 2n;
+    const dexSpreadBps =
+      dexMid > 0n ? (Number(dexBuyPrice - dexSellPrice) * 10_000) / Number(dexMid) : 0;
+
+    const pool = this.poolAddress ? `  pool=${this.poolAddress}` : '';
+    const warn = dexSpreadBps > 500 ? '  [dex_spread_extremely_wide]' : '';
+
+    log.info(
+      `[NO_SIGNAL] ${pair}  size=${sizeNum.toFixed(4)} ${base}  thr=${this.minSpreadBps}bps\n` +
+        `\tcex  bid=${px(cexBid)}  ask=${px(cexAsk)}  spread=${bps(cexSpreadBps)}\n` +
+        `\tdex  sell=${px(dexSellPrice)}  buy=${px(dexBuyPrice)}  spread=${bps(dexSpreadBps)}\n` +
+        `\t${pool}${warn}\n` +
+        `\tB>D=${bps(buyCexSellDexBps)}  D>B=${bps(buyDexSellCexBps)}`,
+    );
   }
 }

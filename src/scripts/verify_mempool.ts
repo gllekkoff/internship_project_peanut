@@ -5,7 +5,7 @@
 import { config } from '@/configs/configs.service';
 import { MempoolMonitor } from '@/pricing/mempool/mempool.service';
 
-const wsUrl = config.chain.mainnetRpcUrl.replace('https', 'wss');
+const wsUrl = config.chain.rpcUrl.replace('https', 'wss');
 
 const monitor = new MempoolMonitor(wsUrl, (swap) => {
   console.log(`[${new Date().toISOString()}] ${swap.method}`);

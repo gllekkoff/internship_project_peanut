@@ -275,10 +275,10 @@ async function testForkSimulation(daiWeth: UniswapV2Pair): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('=== Pricing Engine Integration Test ===');
-  console.log(`RPC:  ${config.chain.mainnetRpcUrl.slice(0, 40)}...`);
+  console.log(`RPC:  ${config.chain.rpcUrl.slice(0, 40)}...`);
   console.log(`Fork: ${FORK_URL ?? '(not set — getQuote will be skipped)'}`);
 
-  const client = new ChainClient([config.chain.mainnetRpcUrl]);
+  const client = new ChainClient([config.chain.rpcUrl]);
 
   const pools = await testPoolLoading(client);
   if (!pools) {

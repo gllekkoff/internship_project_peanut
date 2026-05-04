@@ -61,3 +61,45 @@ export interface WeightEntry {
   time: number;
   weight: number;
 }
+
+/** Normalised trade event from the WebSocket trade stream. All prices scaled by PRICE_SCALE. */
+export interface TradeEvent {
+  readonly symbol: string;
+  readonly tradeId: number;
+  readonly price: bigint;
+  readonly quantity: bigint;
+  readonly timestamp: number;
+  readonly isBuyerMaker: boolean;
+}
+
+/** Normalised 24h mini-ticker from the WebSocket ticker stream. All prices scaled by PRICE_SCALE. */
+export interface TickerEvent {
+  readonly symbol: string;
+  readonly lastPrice: bigint;
+  readonly openPrice: bigint;
+  readonly highPrice: bigint;
+  readonly lowPrice: bigint;
+  readonly volume: bigint;
+  readonly quoteVolume: bigint;
+  readonly timestamp: number;
+}
+
+export type OrderBookCallback = (book: OrderBook) => void;
+export type TradeCallback = (trade: TradeEvent) => void;
+export type TickerCallback = (ticker: TickerEvent) => void;
+
+/** Returned by each subscribe* call — call unsubscribe() to stop receiving events. */
+export interface Subscription {
+  unsubscribe(): void;
+}
+
+/** Binance trading filter rules for a symbol. All sizes scaled by PRICE_SCALE. */
+export interface TradingRules {
+  readonly symbol: string;
+  /** LOT_SIZE step — quantity must be a multiple of this. */
+  readonly stepSize: bigint;
+  /** PRICE_FILTER tick — price must be a multiple of this. */
+  readonly tickSize: bigint;
+  /** MIN_NOTIONAL — qty * price must be >= this value. */
+  readonly minNotional: bigint;
+}

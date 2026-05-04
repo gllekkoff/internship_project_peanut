@@ -1,6 +1,14 @@
+import { encodeFunctionData, decodeEventLog, type Hex } from 'viem';
 import { PRICE_SCALE, PRICE_SCALE_NUM } from '@/core/core.constants'; // PRICE_SCALE_NUM used at ccxt boundary
+import { makeLogger, logError } from '@/core/core.logger';
 import { sleep } from '@/chain/chain.utils';
+import { Address, type Token } from '@/core/core.types';
+import type { ChainClient } from '@/chain/chain.client';
+import type { WalletManager } from '@/core/wallet.service';
+import { TransactionBuilder } from '@/chain/transaction.service';
 import type { ExchangeClient } from '@/exchange/cexClient/exchange.client';
+import type { TradingRules } from '@/exchange/cexClient/exchange.interfaces';
+import { roundQuantity, roundPrice, checkMinNotional } from '@/exchange/cexClient/exchange.utils';
 import type { PricingEngine } from '@/pricing/engine/engine.service';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
@@ -13,7 +21,7 @@ import {
   type ExecutorConfig,
   type LegResult,
 } from '@/executor/engine/engine.interfaces';
-import { UnwindError } from '@/executor/engine/engine.errors';
+import { UnwindError, StaleQuoteError, ConfigurationError } from '@/executor/engine/engine.errors';
 import {
   CEX_PRICE_BUFFER_BPS,
   DEFAULT_LEG1_TIMEOUT_MS,
@@ -21,6 +29,14 @@ import {
   DEFAULT_MIN_FILL_RATIO,
 } from '@/executor/engine/engine.constants';
 import { CircuitBreaker, ReplayProtection } from '@/executor/recovery/recovery.service';
+import {
+  ROUTER_ABI,
+  DEFAULT_DEADLINE_OFFSET,
+  UNISWAP_V2_ROUTER,
+} from '@/pricing/forkSimulator/fork.constants';
+import { TRANSFER_ABI, TRANSFER_TOPIC } from '@/chain/analyzer/analyzer.constants';
+
+const log = makeLogger('Executor');
 
 /** Executes arbitrage signals across CEX and DEX with circuit breaking and replay protection. */
 export class Executor {
@@ -29,8 +45,13 @@ export class Executor {
   private readonly minFillRatio: number;
   private readonly useFlashbots: boolean;
   private readonly simulationMode: boolean;
+  private readonly dexSlippageBps: bigint;
+  private readonly gasBufferMultiplier: number;
+  private readonly router: Address;
+  private readonly pairTokens: Map<string, readonly [Token, Token]> | undefined;
   private readonly circuitBreaker = new CircuitBreaker();
   private readonly replayProtection = new ReplayProtection();
+  private readonly tradingRules: Map<string, TradingRules>;
 
   constructor(
     private readonly exchangeClient: ExchangeClient,
@@ -38,18 +59,22 @@ export class Executor {
     private readonly inventory: InventoryTracker,
     private readonly profile: VenueProfile,
     config: ExecutorConfig = {},
+    private readonly chainClient: ChainClient | null = null,
+    private readonly wallet: WalletManager | null = null,
+    private readonly flashbotsChainClient: ChainClient | null = null,
   ) {
     this.leg1TimeoutMs = config.leg1TimeoutMs ?? DEFAULT_LEG1_TIMEOUT_MS;
     this.leg2TimeoutMs = config.leg2TimeoutMs ?? DEFAULT_LEG2_TIMEOUT_MS;
     this.minFillRatio = config.minFillRatio ?? DEFAULT_MIN_FILL_RATIO;
     this.useFlashbots = config.useFlashbots ?? true;
     this.simulationMode = config.simulationMode ?? true;
+    this.dexSlippageBps = config.dexSlippageBps ?? 50n;
+    this.gasBufferMultiplier = config.gasBufferMultiplier ?? 1.25;
+    this.router = config.router ?? UNISWAP_V2_ROUTER;
+    this.pairTokens = config.pairTokens;
+    this.tradingRules = config.tradingRules ?? new Map();
   }
 
-  /**
-   * Runs all pre-flight checks then executes both legs in order.
-   * DEX-first when useFlashbots is true (failed tx = no cost), CEX-first otherwise.
-   */
   async execute(signal: Signal): Promise<ExecutionContext> {
     const ctx = this.makeContext(signal);
 
@@ -73,11 +98,8 @@ export class Executor {
     }
 
     const [base = '', quote = ''] = signal.pair.split('/');
-    // quoteNeeded = base size × price, scaled — approximated from signal price.
     const quoteNeeded = (signal.size * signal.cexPrice) / PRICE_SCALE;
     const isBuyDex = signal.direction === Direction.BUY_DEX_SELL_CEX;
-    // BUY_DEX_SELL_CEX: spend USDT at WALLET on DEX, sell ETH at BINANCE on CEX.
-    // BUY_CEX_SELL_DEX: spend USDT at BINANCE on CEX, sell ETH at WALLET on DEX.
     const inventoryCheck = this.inventory.canExecute(
       isBuyDex ? Venue.WALLET : Venue.BINANCE,
       quote,
@@ -106,7 +128,6 @@ export class Executor {
     return result;
   }
 
-  /** CEX leg first — default when not using Flashbots. Unwinds on DEX failure. */
   private async executeCexFirst(ctx: ExecutionContext): Promise<ExecutionContext> {
     const { signal } = ctx;
 
@@ -139,12 +160,24 @@ export class Executor {
     );
     if (!leg2) {
       ctx.state = ExecutorState.UNWINDING;
-      await this.unwind(ctx).catch(() => {});
+      await this.unwind(ctx).catch((e: unknown) => {
+        logError(log, 'Unwind failed', {
+          pair: ctx.signal.pair,
+          state: ctx.state,
+          cause: e instanceof Error ? e.message : String(e),
+        });
+      });
       return this.fail(ctx, 'DEX timeout — unwound');
     }
     if (!leg2.success) {
       ctx.state = ExecutorState.UNWINDING;
-      await this.unwind(ctx).catch(() => {});
+      await this.unwind(ctx).catch((e: unknown) => {
+        logError(log, 'Unwind failed', {
+          pair: ctx.signal.pair,
+          state: ctx.state,
+          cause: e instanceof Error ? e.message : String(e),
+        });
+      });
       return this.fail(ctx, `DEX failed — unwound: ${leg2.error ?? ''}`);
     }
 
@@ -156,7 +189,6 @@ export class Executor {
     return ctx;
   }
 
-  /** DEX leg first — preferred with Flashbots since a failed tx costs no gas. Unwinds on CEX failure. */
   private async executeDexFirst(ctx: ExecutionContext): Promise<ExecutionContext> {
     const { signal } = ctx;
 
@@ -183,12 +215,24 @@ export class Executor {
     );
     if (!leg2) {
       ctx.state = ExecutorState.UNWINDING;
-      await this.unwind(ctx).catch(() => {});
+      await this.unwind(ctx).catch((e: unknown) => {
+        logError(log, 'Unwind failed', {
+          pair: ctx.signal.pair,
+          state: ctx.state,
+          cause: e instanceof Error ? e.message : String(e),
+        });
+      });
       return this.fail(ctx, 'CEX timeout after DEX — unwound');
     }
     if (!leg2.success) {
       ctx.state = ExecutorState.UNWINDING;
-      await this.unwind(ctx).catch(() => {});
+      await this.unwind(ctx).catch((e: unknown) => {
+        logError(log, 'Unwind failed', {
+          pair: ctx.signal.pair,
+          state: ctx.state,
+          cause: e instanceof Error ? e.message : String(e),
+        });
+      });
       return this.fail(ctx, `CEX failed after DEX — unwound: ${leg2.error ?? ''}`);
     }
 
@@ -200,20 +244,40 @@ export class Executor {
     return ctx;
   }
 
-  /**
-   * Executes the CEX leg via createLimitIocOrder with a 0.1% price buffer.
-   * In simulation mode returns a synthetic fill after a short delay.
-   */
   private async executeCexLeg(signal: Signal, size: bigint): Promise<LegResult> {
     if (this.simulationMode) {
       await sleep(100);
       return { success: true, price: (signal.cexPrice * 10001n) / 10000n, filled: size };
     }
 
-    const sizeNum = Number(size) / PRICE_SCALE_NUM;
-    const priceNum =
-      Number((signal.cexPrice * (10000n + CEX_PRICE_BUFFER_BPS)) / 10000n) / PRICE_SCALE_NUM;
     const side = signal.direction === Direction.BUY_CEX_SELL_DEX ? 'buy' : 'sell';
+    const priceRaw =
+      side === 'buy'
+        ? (signal.cexPrice * (10000n + CEX_PRICE_BUFFER_BPS)) / 10000n
+        : (signal.cexPrice * (10000n - CEX_PRICE_BUFFER_BPS)) / 10000n;
+    const rules = this.tradingRules.get(signal.pair);
+    const adjustedSize = rules ? roundQuantity(size, rules.stepSize) : size;
+    const adjustedPrice = rules ? roundPrice(priceRaw, rules.tickSize) : priceRaw;
+
+    if (adjustedSize === 0n) {
+      return {
+        success: false,
+        price: 0n,
+        filled: 0n,
+        error: 'Size rounded to zero (below LOT_SIZE step)',
+      };
+    }
+    if (rules && !checkMinNotional(adjustedSize, adjustedPrice, rules.minNotional)) {
+      return {
+        success: false,
+        price: 0n,
+        filled: 0n,
+        error: `Order below MIN_NOTIONAL (${rules.minNotional})`,
+      };
+    }
+
+    const sizeNum = Number(adjustedSize) / PRICE_SCALE_NUM;
+    const priceNum = Number(adjustedPrice) / PRICE_SCALE_NUM;
 
     const order = await this.exchangeClient.createLimitIocOrder(
       signal.pair,
@@ -232,49 +296,135 @@ export class Executor {
     };
   }
 
-  /**
-   * Executes the DEX leg via the pricing engine.
-   * In simulation mode returns a synthetic fill after a short delay.
-   * Real execution requires PricingEngine integration — throws if not in simulation mode.
-   */
+  /** Wallet must have approved Router02 to spend tokenIn before calling in real mode. */
   private async executeDexLeg(signal: Signal, size: bigint): Promise<LegResult> {
     if (this.simulationMode) {
       await sleep(500);
       return { success: true, price: (signal.dexPrice * 9998n) / 10000n, filled: size };
     }
 
-    // Real DEX execution is wired through PricingEngine + TransactionBuilder.
-    if (!this.pricingEngine) {
-      throw new Error(
-        'Real DEX execution requires a PricingEngine — pass one to the Executor constructor',
+    if (!this.pricingEngine || !this.chainClient || !this.wallet) {
+      throw new ConfigurationError(
+        'Real DEX execution requires pricingEngine, chainClient, and wallet in the Executor constructor',
       );
     }
-    throw new Error('Real DEX execution not yet implemented');
+
+    const [tokenIn, tokenOut] = this.resolvePairTokens(signal);
+    const senderAddress = new Address(this.wallet.getAddress());
+
+    const amountInNative = (size * 10n ** BigInt(tokenIn.decimals)) / PRICE_SCALE;
+
+    const gasPrice = await this.chainClient.getGasPrice();
+    const quote = await this.pricingEngine.getQuote(
+      tokenIn,
+      tokenOut,
+      amountInNative,
+      gasPrice.baseFee / 1_000_000_000n,
+      senderAddress,
+    );
+
+    if (!quote.isValid) {
+      throw new StaleQuoteError(
+        `Quote invalid: simulated ${quote.simulatedOutput} diverges from expected ${quote.expectedOutput} beyond tolerance`,
+      );
+    }
+
+    // Use the more conservative of the two quote sources so neither can silently widen the floor.
+    const conservativeOutput =
+      quote.simulatedOutput < quote.expectedOutput ? quote.simulatedOutput : quote.expectedOutput;
+    const amountOutMin = (conservativeOutput * (10_000n - this.dexSlippageBps)) / 10_000n;
+    const deadline = BigInt(Math.floor(Date.now() / 1000)) + DEFAULT_DEADLINE_OFFSET;
+
+    const calldata = encodeFunctionData({
+      abi: ROUTER_ABI,
+      functionName: 'swapExactTokensForTokens',
+      args: [
+        amountInNative,
+        amountOutMin,
+        [tokenIn.address.value as Hex, tokenOut.address.value as Hex],
+        senderAddress.value as Hex,
+        deadline,
+      ],
+    });
+
+    const sendClient = this.flashbotsChainClient ?? this.chainClient;
+
+    const receipt = await new TransactionBuilder(sendClient, this.wallet)
+      .to(this.router)
+      .data(Buffer.from(calldata.slice(2), 'hex'))
+      .withGasEstimate(this.gasBufferMultiplier)
+      .withGasPrice('medium')
+      .sendAndWait(Math.ceil(this.leg2TimeoutMs / 1000));
+
+    const amountOutNative = this.parseSwapOutput(receipt.logs, tokenOut, senderAddress);
+
+    const [quoteAmt, quoteDecimals, baseAmt, baseDecimals] =
+      signal.direction === Direction.BUY_DEX_SELL_CEX
+        ? [amountInNative, tokenIn.decimals, amountOutNative, tokenOut.decimals]
+        : [amountOutNative, tokenOut.decimals, amountInNative, tokenIn.decimals];
+    const price =
+      baseAmt > 0n
+        ? (quoteAmt * 10n ** BigInt(baseDecimals) * PRICE_SCALE) /
+          (baseAmt * 10n ** BigInt(quoteDecimals))
+        : 0n;
+
+    return { success: true, price, filled: size };
   }
 
-  /**
-   * Reverses the leg1 position via a market order when leg2 fails.
-   * Only CEX unwind is supported — DEX unwind requires a separate on-chain tx.
-   */
+  private resolvePairTokens(signal: Signal): [Token, Token] {
+    if (!this.pairTokens) {
+      throw new ConfigurationError(
+        'pairTokens not set in ExecutorConfig — required for real DEX execution',
+      );
+    }
+    const entry = this.pairTokens.get(signal.pair);
+    if (!entry) {
+      throw new ConfigurationError(`No token mapping found for pair: ${signal.pair}`);
+    }
+    const [base, quote] = entry;
+    // BUY_DEX_SELL_CEX: spend quote (e.g. USDC), receive base (e.g. WETH)
+    return signal.direction === Direction.BUY_DEX_SELL_CEX ? [quote, base] : [base, quote];
+  }
+
+  private parseSwapOutput(logs: unknown[], tokenOut: Token, recipient: Address): bigint {
+    for (const rawLog of [...logs].reverse()) {
+      const log = rawLog as { address: string; topics: string[]; data: string };
+      if (log.address.toLowerCase() !== tokenOut.address.lower) continue;
+      if (log.topics[0] !== TRANSFER_TOPIC) continue;
+      try {
+        const { args } = decodeEventLog({
+          abi: TRANSFER_ABI,
+          topics: log.topics as [Hex, ...Hex[]],
+          data: log.data as Hex,
+        });
+        if (args.to.toLowerCase() === recipient.lower) return args.value;
+      } catch {
+        // malformed log — skip
+      }
+    }
+    return 0n;
+  }
+
   private async unwind(ctx: ExecutionContext): Promise<void> {
     if (this.simulationMode) {
       await sleep(100);
       return;
     }
 
-    const fillSize = ctx.leg1Venue === 'cex' ? ctx.leg1FillSize : ctx.leg2FillSize;
+    const fillSize = ctx.leg1FillSize;
     if (!fillSize || fillSize === 0n) return;
 
-    const { signal } = ctx;
-    const unwindVenue = ctx.leg1Venue === 'cex' ? 'cex' : ctx.leg2Venue;
-
-    if (unwindVenue !== 'cex') {
-      // DEX unwind requires an on-chain transaction — not yet implemented.
-      throw new UnwindError('DEX-side unwind not yet implemented');
+    if (ctx.leg1Venue === 'dex') {
+      await this.unwindDexLeg(ctx, fillSize);
+      return;
     }
 
-    const sizeNum = Number(fillSize) / PRICE_SCALE_NUM;
-    // Reverse the CEX position: if we bought, sell back; if we sold, buy back.
+    const { signal } = ctx;
+    const rules = this.tradingRules.get(signal.pair);
+    const adjustedFill = rules ? roundQuantity(fillSize, rules.stepSize) : fillSize;
+    if (adjustedFill === 0n) return;
+
+    const sizeNum = Number(adjustedFill) / PRICE_SCALE_NUM;
     const unwindSide = signal.direction === Direction.BUY_CEX_SELL_DEX ? 'sell' : 'buy';
 
     try {
@@ -287,10 +437,58 @@ export class Executor {
     }
   }
 
-  /**
-   * Applies completed fill data to InventoryTracker for both legs.
-   * Called only after DONE state — no-op on partial or failed executions.
-   */
+  private async unwindDexLeg(ctx: ExecutionContext, fillSize: bigint): Promise<void> {
+    if (!this.chainClient || !this.wallet) {
+      throw new UnwindError('DEX unwind requires chainClient and wallet — cannot reverse position');
+    }
+
+    const { signal } = ctx;
+    const fillPrice = ctx.leg1FillPrice ?? 0n;
+
+    const [tokenIn, tokenOut] = this.resolvePairTokens(signal);
+    const unwindTokenIn = tokenOut;
+    const unwindTokenOut = tokenIn;
+
+    const amountInNative =
+      signal.direction === Direction.BUY_DEX_SELL_CEX
+        ? (fillSize * 10n ** BigInt(unwindTokenIn.decimals)) / PRICE_SCALE
+        : (fillSize * fillPrice * 10n ** BigInt(unwindTokenIn.decimals)) /
+          (PRICE_SCALE * PRICE_SCALE);
+
+    if (amountInNative === 0n) return;
+
+    const senderAddress = new Address(this.wallet.getAddress());
+    const deadline = BigInt(Math.floor(Date.now() / 1000)) + DEFAULT_DEADLINE_OFFSET;
+
+    const calldata = encodeFunctionData({
+      abi: ROUTER_ABI,
+      functionName: 'swapExactTokensForTokens',
+      args: [
+        amountInNative,
+        0n, // amountOutMin=0: accept any price on emergency unwind
+        [unwindTokenIn.address.value as Hex, unwindTokenOut.address.value as Hex],
+        senderAddress.value as Hex,
+        deadline,
+      ],
+    });
+
+    const sendClient = this.flashbotsChainClient ?? this.chainClient;
+
+    try {
+      await new TransactionBuilder(sendClient, this.wallet)
+        .to(this.router)
+        .data(Buffer.from(calldata.slice(2), 'hex'))
+        .withGasEstimate(this.gasBufferMultiplier)
+        .withGasPrice('high')
+        .sendAndWait(Math.ceil(this.leg2TimeoutMs / 1000));
+    } catch (e) {
+      throw new UnwindError(
+        `DEX unwind swap failed for ${signal.pair}: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
+    }
+  }
+
   private recordTrades(ctx: ExecutionContext): void {
     const { signal } = ctx;
     const [base = '', quote = ''] = signal.pair.split('/');
@@ -300,7 +498,6 @@ export class Executor {
     const leg2Price = ctx.leg2FillPrice ?? 0n;
     const leg1Notional = (leg1Size * leg1Price) / PRICE_SCALE;
     const leg2Notional = (leg2Size * leg2Price) / PRICE_SCALE;
-    // Fee per leg: half of the combined rate applied to that leg's notional.
     const halfFeeBps = this.profile.trading.combinedFeeRateBps / 2n;
     const leg1Fee = (leg1Notional * halfFeeBps) / 10_000n;
     const leg2Fee = (leg2Notional * halfFeeBps) / 10_000n;
@@ -352,12 +549,6 @@ export class Executor {
     }
   }
 
-  /**
-   * Realised PnL in quote currency (scaled by PRICE_SCALE) after both legs.
-   * BUY_CEX_SELL_DEX: profit = (leg2Price - leg1Price) * size.
-   * BUY_DEX_SELL_CEX: profit = (leg1Price - leg2Price) * size.
-   * Fees deducted at the combined rate applied to the leg1 notional.
-   */
   private calculatePnl(ctx: ExecutionContext): bigint {
     const { signal } = ctx;
     const leg1Price = ctx.leg1FillPrice ?? 0n;
@@ -369,13 +560,14 @@ export class Executor {
         ? ((leg2Price - leg1Price) * size) / PRICE_SCALE
         : ((leg1Price - leg2Price) * size) / PRICE_SCALE;
 
-    const notionalScaled = (leg1Price * size) / PRICE_SCALE;
-    const feeScaled = (notionalScaled * this.profile.trading.combinedFeeRateBps) / 10_000n;
+    // Use signal's pre-computed fee estimate (includes gas + CEX + DEX fees) for consistency
+    // with the signal generation model. Fill size may differ slightly from signal.size on partial fills.
+    const fillRatio = signal.size > 0n ? (size * 10_000n) / signal.size : 10_000n;
+    const feeScaled = (signal.expectedFees * fillRatio) / 10_000n;
 
     return grossScaled - feeScaled;
   }
 
-  /** Resolves to null on timeout, or a failed LegResult on thrown error. */
   private async withTimeout(promise: Promise<LegResult>, ms: number): Promise<LegResult | null> {
     return Promise.race([
       promise.catch(

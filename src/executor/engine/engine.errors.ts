@@ -11,3 +11,9 @@ export class LegExecutionError extends AppError {}
 
 /** Unwind trade failed after a partial fill — position may be stuck. */
 export class UnwindError extends AppError {}
+
+/** Fork simulation diverged too far from AMM prediction — quote is stale or pool state changed. */
+export class StaleQuoteError extends AppError {}
+
+/** Executor was called without required configuration (pricingEngine, wallet, or pairTokens). */
+export class ConfigurationError extends AppError {}

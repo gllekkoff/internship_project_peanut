@@ -1,4 +1,6 @@
 import type { Signal } from '@/strategy/signal.interfaces';
+import type { Address, Token } from '@/core/core.types';
+import type { TradingRules } from '@/exchange/cexClient/exchange.interfaces';
 
 /** Lifecycle state of a two-legged arb execution. */
 export enum ExecutorState {
@@ -50,6 +52,16 @@ export interface ExecutorConfig {
   readonly useFlashbots?: boolean;
   /** When true, legs are simulated with artificial delays — no real orders are sent (default true). */
   readonly simulationMode?: boolean;
+  /** Token pair map required for real DEX execution — maps pair string (e.g. "ETH/USDT") to [base, quote]. */
+  readonly pairTokens?: Map<string, readonly [Token, Token]>;
+  /** Router used for DEX swaps on the configured chain. */
+  readonly router?: Address;
+  /** Slippage tolerance applied to DEX amountOutMin (default 50 = 0.5%). */
+  readonly dexSlippageBps?: bigint;
+  /** Gas estimate buffer multiplier for DEX transactions (default 1.25 = +25%). */
+  readonly gasBufferMultiplier?: number;
+  /** Binance LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL rules per pair — applied before every CEX order. */
+  readonly tradingRules?: Map<string, TradingRules>;
 }
 
 /** Normalised result returned from an individual leg execution. */

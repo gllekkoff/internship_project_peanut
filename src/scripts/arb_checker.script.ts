@@ -17,7 +17,7 @@ import { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
 import { PricingEngine } from '@/pricing/engine/engine.service';
 import { ExchangeClient } from '@/exchange/cexClient/exchange.client';
 import { PRICE_SCALE } from '@/core/core.constants';
-import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
+import { getBinanceProfile } from '@/venues/binance/binance.profile';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { PnLEngine } from '@/inventory/pnl/pnl.service';
 import { WalletManager } from '@/core/wallet.service';
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
 
   const [baseAsset] = pair.split('/') as [string, string];
 
-  const chainClient = new ChainClient([config.chain.mainnetRpcUrl]);
+  const chainClient = new ChainClient([config.chain.rpcUrl]);
   const pricingEngine = new PricingEngine(
     chainClient,
     'http://127.0.0.1:8545',
@@ -131,7 +131,7 @@ async function main(): Promise<void> {
       options: { ...config.binance.options },
       enableRateLimit: config.binance.enableRateLimit,
     },
-    BINANCE_PROFILE,
+    getBinanceProfile(config.production),
   );
 
   const tradeSize = BigInt(Math.round(size * Number(PRICE_SCALE)));

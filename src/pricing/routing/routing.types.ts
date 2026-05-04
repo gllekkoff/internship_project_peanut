@@ -11,6 +11,12 @@ export interface GraphEdge {
 /** Adjacency map: token address (lowercase) → list of reachable pools. */
 export type RouteGraph = Map<string, GraphEdge[]>;
 
+/** Optional gas model overrides for RouteFinder — supply empirically measured values instead of defaults. */
+export interface RouteFinderConfig {
+  readonly gasBase?: bigint;
+  readonly gasPerHop?: bigint;
+}
+
 /** Per-route breakdown returned by RouteFinder.compareRoutes. */
 export interface RouteComparison {
   readonly route: Route;

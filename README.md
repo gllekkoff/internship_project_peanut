@@ -1,6 +1,6 @@
-# Internship project - Arbitrage
+# Arbitrage Bot
 
-TypeScript infrastructure for Ethereum DeFi arbitrage — wallet management, on-chain queries, AMM pricing, CEX connectivity, inventory management, signal generation, scoring, and end-to-end execution.
+TypeScript CEX-DEX arbitrage infrastructure on Arbitrum — wallet management, on-chain queries, AMM pricing, Binance connectivity, inventory tracking, signal generation, scoring, safety, and end-to-end execution.
 
 ---
 
@@ -8,275 +8,164 @@ TypeScript infrastructure for Ethereum DeFi arbitrage — wallet management, on-
 
 The project is built in layers that feed into a live arb bot.
 
-**Chain** is the foundation — `ChainClient` (viem) handles all Ethereum RPC calls with failover and retry. `WalletManager` and `TransactionService` sit on top for signing and submission.
+**Chain** is the foundation. `ChainClient` (viem) handles all Ethereum RPC calls with multi-endpoint failover and exponential backoff retry. `WalletManager` and `TransactionBuilder` sit on top for signing and EIP-1559 submission.
 
-**Pricing** builds on chain. `UniswapV2Pair` loads pool state from chain, `RouteFinder` finds the best multi-hop path, `ForkSimulator` validates the math against real Solidity on an Anvil fork, and `MempoolMonitor` keeps pool state fresh by watching pending swaps over WebSocket. `PricingEngine` orchestrates all of this — `getQuote()` for full fork-validated pricing, `getAmmQuote()` for fast pool-math-only pricing used during signal generation.
+**Pricing** builds on chain. `UniswapV2Pair` loads pool state from chain, `RouteFinder` finds the best multi-hop path, `ForkSimulator` validates the math against real Solidity on an Anvil fork, and `MempoolMonitor` watches pending swaps over WebSocket. `PricingEngine` orchestrates all of this — `getQuote()` for fork-validated pricing, `getAmmQuote()` for fast pool-math-only pricing used during signal generation. Sync events keep reserves fresh without polling.
 
-**Exchange** is independent of chain. `ExchangeClient` connects to Binance via ccxt and fetches live order books and balances. `OrderBookAnalyzer` simulates fills, measures depth, and computes slippage from a snapshot.
+**Exchange** is independent of chain. `ExchangeClient` connects to Binance via ccxt with a sliding-window rate limiter and maps ccxt errors to typed domain errors. `OrderBookAnalyzer` simulates fills, measures depth, and computes slippage from a snapshot.
 
-**Inventory** tracks the state of our own positions. `InventoryTracker` holds balances across venues and validates arb legs before execution. `RebalancePlanner` generates transfer plans when positions drift. `PnLEngine` records completed trades and produces aggregate reports.
+**Inventory** tracks live positions. `InventoryTracker` holds balances across Binance and wallet. `RebalancePlanner` generates transfer plans when positions drift. `PnLEngine` records completed trades and produces aggregate reports.
 
-**Strategy** is where signals are generated and ranked. `SignalGenerator` compares live CEX and DEX prices, computes net PnL after live gas costs and fees, and emits a typed `Signal`. `SignalScorer` ranks signals 0–100 across spread, inventory health, and trade history, with time-decay applied as the signal ages.
+**Strategy** is where signals are generated and ranked. `SignalGenerator` compares live CEX order book (VWAP walk) against DEX AMM output at trade size, computes net PnL after live gas costs and fees, and emits a typed `Signal`. `SignalScorer` ranks signals 0–100 across spread, inventory health, and trade history with time-decay.
 
-**Executor** turns a signal into real orders. `Executor` runs pre-flight checks, executes both legs (CEX-first), handles partial fills, unwinds on failure, and records the result back to `InventoryTracker`.
+**Safety** is a hard gate before execution. `RiskManager` enforces daily loss limits, drawdown ceiling, per-trade size limits, and trade frequency. `PreTradeValidator` checks spread sanity and signal freshness. `AbsoluteSafetyCheck` is a hard ceiling independent of the risk manager. `KillSwitch` shuts the bot down immediately via a file flag or Telegram `/stop`.
 
-**ArbBot** is the top-level entry point that wires all layers together into a polling loop.
+**Executor** turns a signal into real orders. Runs circuit-breaker and replay-protection pre-flight, executes CEX leg (limit IOC), then DEX leg (on-chain swap), unwinds the CEX position via market order if the DEX leg fails, and records fills back to `InventoryTracker`.
 
-All monetary values across all subsystems use `bigint` scaled by `PRICE_SCALE = 1e8`.
+**ArbBot** (`src/integration/arbBot/`) is the top-level service that wires all layers into a WebSocket-driven event loop.
+
+All monetary values use `bigint` scaled by `PRICE_SCALE = 1e8`.
 
 ---
 
 ## Modules
 
 ### `core`
-
-Shared primitives used across all modules.
-
-Defines `Address`, `Token`, and `TokenAmount` types. `AppError` is the base for all domain errors — sanitises private keys from messages automatically. `WalletManager` handles key loading and signing. `SerializerService` handles JSON serialisation of bigint values.
-
----
+Shared primitives. `Address`, `Token`, `TokenAmount` types. `AppError` base class — sanitises private keys from error messages automatically. `WalletManager` for key loading and signing. `makeLogger` / `logTrade` / `logError` for structured output.
 
 ### `chain`
-
-Ethereum RPC layer.
-
-`ChainClient` wraps viem with multi-endpoint failover and exponential backoff retry. Exposes `getGasPrice()` which samples the last 5 blocks and returns priority fees at the 10th/50th/90th percentiles. `TransactionService` builds and submits EIP-1559 transactions. `GasPrice` holds fee data and computes `maxFeePerGas` with a configurable base-fee buffer. `analyzer/` is a CLI that decodes calldata and logs token transfers for any tx hash.
-
----
+Ethereum RPC layer. `ChainClient` wraps viem with failover and retry. `getGasPrice()` samples the last 5 blocks and returns fees at the 10th/50th/90th percentile. `TransactionBuilder` builds and submits EIP-1559 transactions with configurable gas multipliers.
 
 ### `configs`
-
-Central environment config.
-
-Validates all env vars at startup and throws immediately on missing required ones. Config is grouped by domain: `config.chain.*` for RPC and keys, `config.binance.*` for exchange credentials.
-
----
+Central env config. Validates all required vars at startup and throws immediately on missing ones. `RUN_MODE` is the single mode switch — see [Configuration](#configuration).
 
 ### `pricing/uniswap-v2`
-
-AMM math and on-chain pair state.
-
-`UniswapV2Pair.fromChain()` loads live reserves and token metadata from chain. `UniswapV2Calculator` implements pure bigint constant-product math for `getAmountOut`, spot price, and price impact — matching Solidity integer arithmetic exactly.
-
----
+AMM math and pool state. `UniswapV2Pair.fromChain()` loads live reserves and token metadata. `UniswapV2Calculator` implements pure bigint constant-product math matching Solidity integer arithmetic exactly.
 
 ### `pricing/routing`
-
-Multi-hop route discovery.
-
-`RouteFinder` runs DFS over a pool graph to find all paths between two tokens. Routes are ranked by gas-adjusted net output so cheaper multi-hop routes beat higher-output ones when gas dominates.
-
----
+Multi-hop route discovery. `RouteFinder` runs DFS over a pool graph to find all paths between two tokens. Routes are ranked by gas-adjusted net output.
 
 ### `pricing/mempool`
-
-Live mempool monitoring over WebSocket.
-
-Subscribes to `eth_subscribe("newPendingTransactions")`, fetches each transaction, and decodes Uniswap V2 router calls into `ParsedSwap` events with normalised token and amount fields.
-
----
+Live mempool monitoring over WebSocket. Subscribes to `eth_subscribe("newPendingTransactions")`, fetches each transaction, and decodes Uniswap V2 router calls into `ParsedSwap` events.
 
 ### `pricing/forkSimulator`
-
-Simulation against a local Anvil fork.
-
-Runs swaps as `eth_call` against real Solidity bytecode — no transaction is broadcast and no state is mutated. Used to validate that TypeScript AMM math matches the on-chain router output exactly.
-
----
+Simulation against a local Anvil fork. Runs swaps as `eth_call` against real Solidity bytecode — no transaction broadcast, no state mutation.
 
 ### `pricing/engine`
-
-Top-level pricing orchestrator.
-
-Two entry points:
-- `getQuote()` — finds the best route, simulates it on the fork via `ForkSimulator`, returns a `Quote` with expected and simulated output. Slow but accurate. Used for final execution validation.
-- `getAmmQuote()` — pool math only, no fork call. Returns expected output in microseconds. Used during signal generation where latency matters.
-
-`startMonitor()` subscribes to the mempool and auto-refreshes affected pool reserves when a relevant swap is detected, keeping AMM quotes fresh between ticks.
-
----
+Top-level pricing orchestrator. `getQuote()` — best route + fork simulation. `getAmmQuote()` — pool math only, used during signal generation. `startPoolMonitor()` subscribes to on-chain `Sync` events so reserves stay current without polling.
 
 ### `exchange/cexClient`
-
-Binance CEX client built on ccxt.
-
-All prices and quantities are `bigint` scaled by `PRICE_SCALE = 1e8`. Includes a sliding-window rate limiter tracking Binance request weights (limit 1100/min with safety buffer). Maps ccxt errors to typed domain errors. Methods: `fetchOrderBook`, `fetchBalance`, `createLimitIocOrder`, `createMarketOrder`, `cancelOrder`, `getTradingFees`, `fetchWithdrawalFees` (returns empty on testnet sandbox where the endpoint is unavailable).
-
----
+Binance client built on ccxt. All prices and quantities are `bigint` scaled by `PRICE_SCALE`. Sliding-window rate limiter tracks Binance request weights (limit 1100/min). Typed domain errors for every ccxt failure mode.
 
 ### `exchange/orderBook`
-
-Order book analysis on a single snapshot.
-
-`walkTheBook(side, qty)` simulates fills across price levels and returns avg fill price and slippage in bps. `depthAtBps(side, bps)` returns total liquidity within a price range. `imbalance()` returns bid/ask volume ratio in `[-1.0, +1.0]`. `effectiveSpread(qty)` measures the real round-trip cost at a given trade size.
-
----
+Order book analysis. `walkTheBook(side, qty)` simulates fills and returns VWAP fill price and slippage in bps. `depthAtBps`, `imbalance`, `effectiveSpread`.
 
 ### `inventory/tracker`
-
-Single source of truth for positions across venues.
-
-Holds live balances for Binance and wallet. `updateFromCex()` and `updateFromWallet()` replace the stored snapshot entirely on each sync. `canExecute()` checks both legs of an arb before execution. `recordTrade()` applies buy/sell/fee deltas to internal balances after a completed execution. `skew()` computes each asset's deviation from the ideal even split across venues.
-
----
+Single source of truth for positions. `updateFromCex()` / `updateFromWallet()` replace snapshots on each sync. `canExecute()` checks both legs before execution. `recordTrade()` applies fill deltas after completion.
 
 ### `inventory/rebalancer`
-
-Transfer plan generation to restore target ratios.
-
-Greedily pairs the largest surplus venue with the largest deficit. Enforces min operating balances per venue (0.5 ETH, 500 USDT) and min withdrawal sizes per asset. `estimateCost()` returns wall-clock time assuming all transfers run in parallel. Threshold and fees come from `VenueProfile` — not hardcoded.
-
----
+Transfer plan generation. Pairs largest surplus venue with largest deficit. Enforces min operating balances and min withdrawal sizes from `VenueProfile`.
 
 ### `inventory/pnl`
-
-Per-trade and aggregate PnL tracking.
-
-`ArbRecord` holds a buy leg, sell leg, and gas cost with computed `grossPnl`, `netPnl`, and `netPnlBps` in bigint. `PnLEngine` records trades and produces summaries with win rate, avg bps, avg per trade, and a Sharpe estimate. Supports CSV export.
-
----
+Per-trade and aggregate PnL. `ArbRecord` holds buy/sell legs with `grossPnl`, `netPnl`, `netPnlBps`. `PnLEngine` tracks win rate, avg bps, Sharpe estimate, and exports CSV.
 
 ### `venues`
-
-Per-exchange configuration profiles.
-
-`VenueProfile` is a plain object holding all venue-specific parameters: rate limits and endpoint weights, withdrawal fees and minimums per asset, min operating balances, rebalance threshold, and combined fee rate in bps. `BINANCE_PROFILE` ships with static defaults. `VenueHydrator.hydrate()` fetches live withdrawal fees at startup and overwrites the mutable entries — falls back to static defaults on testnet sandboxes where the endpoint is unavailable. `profile.hydrated` is set to `true` regardless so the bot can assert readiness.
-
----
+Per-exchange config profiles. `VenueProfile` holds rate limits, withdrawal fees, min balances, and combined fee rate. `VenueHydrator.hydrate()` fetches live withdrawal fees at startup, falls back to static defaults on testnet.
 
 ### `strategy/fee.calculator`
-
-Pure fee math — no side effects.
-
-`totalFee(tradeValue, liveGasCost?)` returns combined CEX taker + DEX swap fees plus gas cost. Accepts an optional live gas cost (bigint, scaled) that overrides the static `gasCost` set at construction — used when `SignalGenerator` has fetched a real gas price from chain.
-
----
+Pure fee math. `totalFee(tradeValue, liveGasCost?)` returns combined CEX taker + DEX swap fees plus gas.
 
 ### `strategy/signal.generator`
-
-Generates arb signals from live price data.
-
-Each tick: fetches the CEX order book, fetches DEX prices (real AMM via `PricingEngine.getAmmQuote()` or random stub in no-DEX mode), fetches the live gas price from `ChainClient`, and computes both spread directions. Emits a `Signal` when net PnL clears `minProfit` after all fees. Signals carry `inventoryOk` and `withinLimits` flags set at generation time. Enforces a per-pair cooldown between signals.
-
-In no-DEX mode the DEX price is a random stub: 0–150 bps above mid for the sell side, 0–80 bps below mid for the buy side — enough to generate varied scores for demo/testing.
-
----
+Generates arb signals. Each tick: walks the CEX order book at trade size, queries the DEX AMM at the same size (both sides include full price impact), fetches live gas from chain, computes both spread directions. Emits a `Signal` when net PnL clears `minProfit`. Enforces per-pair cooldown.
 
 ### `strategy/scorer`
-
-Multi-factor signal ranking.
-
-`score(signal, checks)` computes a composite 0–100 score:
+Multi-factor signal ranking (0–100):
 
 | Factor | Weight | Source |
 |--------|--------|--------|
 | Spread | 40% | Linear: minSpreadBps → 0, excellentSpreadBps → 100 |
-| Liquidity | 20% | Fixed 80 (placeholder — no depth feed yet) |
+| Liquidity | 20% | Fixed 80 (placeholder) |
 | Inventory | 20% | 60 normally, 20 when rebalance is flagged |
-| History | 20% | Win rate of last 20 executions for the pair (50 when < 3 data points) |
+| History | 20% | Win rate of last 20 executions for the pair |
 
-`applyDecay(signal, score?)` applies a linear decay of up to 50% as the signal ages toward its TTL. `recordResult(pair, success)` feeds the history component after each execution.
+`applyDecay()` applies up to 50% linear decay as the signal ages toward its TTL.
 
----
+### `safety`
+Hard gates before execution. `RiskManager` — daily loss limit, drawdown ceiling, per-trade size, trade frequency. `PreTradeValidator` — spread sanity (rejects > 1000 bps), signal freshness. `absoluteSafetyCheck` — independent ceiling (max $10k/trade, $50 daily loss, $100k capital, 10 trades/hour). `KillSwitch` — file-based, polled every tick. `AutoKillSwitch` — trips after 3 consecutive errors.
 
 ### `executor/engine`
+Two-legged execution with circuit breaking and replay protection. Pre-flight: circuit breaker (3 failures / 60s window), replay protection (TTL-keyed signal IDs), signal expiry, inventory check. Execution: CEX limit IOC with 0.1% price buffer → DEX on-chain swap with `amountOutMin = min(expectedOutput, simulatedOutput) × (1 − slippage)` → unwind via CEX market order on failure.
 
-Two-legged arb execution with circuit breaking and replay protection.
+### `notifications`
+`TelegramNotifier` sends trade alerts, balance snapshots, and error notifications. Listens for `/stop` command to trigger graceful shutdown.
 
-Pre-flight checks before any order:
-1. Circuit breaker — trips after 3 failures within 60 seconds, auto-resets after cooldown
-2. Replay protection — rejects duplicate signal IDs within their TTL window
-3. `signal.isValid()` — checks expiry, `inventoryOk`, `withinLimits`, positive net PnL
-4. `inventory.canExecute()` — live pre-flight on both legs
-
-Execution (CEX-first, Flashbots disabled):
-- **Leg 1 (CEX)** — limit IOC order with 0.1% price buffer, 5s timeout, 80% minimum fill ratio
-- **Leg 2 (DEX)** — simulated fill in dry-run; real on-chain execution not yet wired
-- **Unwind** — if Leg 2 fails, a market order reverses the Leg 1 CEX position
-
-On success: `recordTrades()` applies fill deltas to `InventoryTracker` for both venues. `calculatePnl()` computes actual realised PnL from fill prices minus the combined fee rate.
+### `integration/arbBot`
+Top-level bot service. Wires all layers into a WebSocket depth-driven loop. Derives the CEX trading pair from pool token symbols at startup (WETH → ETH normalization) — no `BOT_PAIR` env var needed.
 
 ---
 
-### `executor/recovery`
+## Running the Bot
 
-Windowed circuit breaker and replay protection.
+### Entry point
 
-`CircuitBreaker` counts failures within a rolling time window — not a simple counter. Trips when `failureThreshold` failures occur within `windowMs`, auto-resets after `cooldownMs`. `ReplayProtection` stores a TTL-keyed set of executed signal IDs and rejects any signal seen within its TTL.
+```bash
+npx tsx src/integration/arbBot/arb_bot.script.ts [options]
+```
 
----
+### CLI options
 
-### `integration/arbChecker`
-
-Stand-alone arb opportunity scanner. Read-only — no orders placed.
-
-Wires `PricingEngine`, `ExchangeClient`, and `InventoryTracker` together. `check(pair)` fetches a live DEX price and CEX order book, calculates the gross gap, estimates all costs (DEX fee, price impact, CEX fee, slippage, gas), runs inventory pre-flight, and returns a full result with direction, cost breakdown, and executable verdict. Used for analysis and reporting — separate from the bot pipeline.
-
----
-
-## Arb Bot
-
-`src/scripts/arb_bot.script.ts` is the main entry point. It runs a polling loop that generates, scores, and executes arb signals across ETH/USDT.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--trade-size <usd>` | `5` | Target trade notional in USD |
+| `--cooldown <ms>` | `500` | Minimum ms between signals for the same pair |
+| `--min-spread <bps>` | `1` | Minimum spread in bps to generate a signal |
 
 ### Pipeline
 
 ```
 startup
-  connect to Binance → verify API keys
-  fetch real CEX balances → InventoryTracker
-  seed wallet with dummy balances (no-DEX/dry-run only)
-  VenueHydrator → live withdrawal fees (static defaults on testnet)
-  load Uniswap V2 pool from chain + start mempool monitor (full mode only)
+  connect to Binance → verify API keys + fetch live withdrawal fees
+  fetch CEX balances → InventoryTracker
+  load Uniswap V2 pool from chain → derive CEX pair from token symbols
+  subscribe to pool Sync events via WebSocket
+  fetch Binance trading rules for the derived pair
 
-tick (every 1s)
-  syncBalances        → refresh CEX balances
-  SignalGenerator     → CEX order book + DEX price + live gas cost → Signal or null
+on each Binance depth update
+  safety gates        → kill switch, auto-kill, risk manager
+  SignalGenerator     → CEX VWAP walk + DEX AMM quote + live gas → Signal or null
+  PreTradeValidator   → spread sanity, signal freshness
   SignalScorer        → composite 0–100 score + time decay
   score < threshold   → skip
-  Executor            → pre-flight checks → CEX limit IOC → DEX sim → recordTrades
+  RiskManager         → daily loss, drawdown, size, frequency limits
+  AbsoluteSafetyCheck → hard ceiling
+  Executor            → circuit breaker → CEX limit IOC → DEX swap → unwind on failure
   PnLEngine           → record ArbRecord → update session summary
+  Telegram            → trade notification
 ```
 
-### Running
+### Example log output
 
-```bash
-# Full simulation — no real orders, random DEX prices, real gas from mainnet RPC
-npx tsx src/scripts/arb_bot.script.ts --dry-run --no-dex
+No signal:
+```
+INFO  [Signal] [NO_SIGNAL] ETH/USDT  size=0.0548 ETH  threshold=1bps
 
-# Real CEX orders on testnet, random DEX prices (no mainnet fork needed)
-npx tsx src/scripts/arb_bot.script.ts --no-dex
+    cex[Binance]   bid=1823.400000  ask=1823.600000  mid=1823.500000  spread=      10.97bps
+    dex[UniV2-Arb] sell=1821.230000  buy=1825.880000  mid=1823.555000  spread=      25.51bps
+        pool : 0xF64Dfe17C8b87F012FCf50FbDA1D62bfA148366a
 
-# Real CEX orders + real Uniswap V2 AMM prices (requires Anvil fork of mainnet)
-npx tsx src/scripts/arb_bot.script.ts
+    routes:
+        buyCexSellDex  gross=     -12.91bps  unit=-0.0236 USDT  total=-0.0013 USDT
+        buyDexSellCex  gross=     -12.58bps  unit=-0.0229 USDT  total=-0.0013 USDT
 ```
 
-### Flags
-
-| Flag | Effect |
-|------|--------|
-| `--dry-run` | Simulates both CEX and DEX legs — no real orders sent |
-| `--no-dex` | Skips Uniswap pool loading, uses random stub for DEX prices |
-
-| Mode | CEX orders | DEX prices | Gas |
-|------|-----------|-----------|-----|
-| `--dry-run --no-dex` | simulated | random stub | live mainnet |
-| `--no-dex` | real testnet | random stub | live mainnet |
-| `--dry-run` | simulated | real AMM | live mainnet |
-| _(none)_ | real | real AMM | live mainnet |
-
-### Inventory in dry-run / no-DEX mode
-
-When `--no-dex` or `--dry-run` is set, the wallet venue is seeded with 100 ETH + 100k USDT so that inventory pre-flight checks pass. The CEX venue always uses real Binance balances fetched each tick. The wallet is never synced from chain in these modes since there is no real on-chain execution.
-
-### Output example
-
+Signal and execution:
 ```
-2026-04-24 08:12:41 INFO  Signal [ETHUSDTa3f7b2c1] ETH/USDT 0.1 ETH — buy_cex_sell_dex
-2026-04-24 08:12:41 INFO    prices : cex=$2308.8200  dex=$2340.7100  spread=138.0bps
-2026-04-24 08:12:41 INFO    pnl    : gross=$3.19  fees=$0.93  net=$2.26
-2026-04-24 08:12:41 INFO    score  : 72.0 (raw=72.0, threshold=60)
-2026-04-24 08:12:41 INFO    → Executing 0.1 ETH
-2026-04-24 08:12:42 INFO  SUCCESS | actual net=$2.11 | session: trades=1 pnl=$2.11 win=100%
+INFO  [Signal] Signal [ETHUSDTa3f7b2c1] ETH/USDT 0.05 ETH — buy_cex_sell_dex
+INFO  [Signal]   prices : cex=$1823.40  dex=$1841.20  spread=97.6bps
+INFO  [Signal]   pnl    : gross=$0.89  fees=$0.31  net=$0.58
+INFO  [Signal]   score  : 74.0 (raw=74.0, threshold=60)
+INFO  [ArbBot]   → Executing 0.05 ETH
+INFO  [ArbBot]   session: trades=1 pnl=$0.58 win=100%
 ```
 
 ---
@@ -289,7 +178,7 @@ When `--no-dex` or `--dry-run` is set, the wallet venue is seeded with 100 ETH +
 npm install
 ```
 
-### 2. Install Foundry (required for fork simulation only)
+### 2. Install Foundry (required for fork simulation)
 
 ```bash
 curl -L https://foundry.paradigm.xyz | bash && foundryup
@@ -301,12 +190,69 @@ curl -L https://foundry.paradigm.xyz | bash && foundryup
 cp .env.example .env
 ```
 
+Edit `.env`:
+
 ```env
-MAINNET_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY   # required
-PRIVATE_KEY=0x...                                                 # required
-BINANCE_TESTNET_API_KEY=...                                       # required for CEX features
-BINANCE_TESTNET_SECRET=...                                        # required for CEX features
-PORT=3000                                                         # optional, default 3000
+# Mode: sim | paper | live
+# sim   — no trades, Binance testnet credentials
+# paper — no trades, live Binance credentials (real market data)
+# live  — real on-chain txs + real Binance orders
+RUN_MODE=sim
+
+# Chain (Arbitrum mainnet)
+CHAIN_ID=42161
+MAINNET_RPC_URL=https://arb-mainnet.g.alchemy.com/v2/<key>
+MAINNET_WS_URL=wss://arb-mainnet.g.alchemy.com/v2/<key>
+SEPOLIA_RPC_URL=https://eth-sepolia.g.alchemy.com/v2/<key>
+
+# Wallet
+PRIVATE_KEY=0x...
+
+# Pool (BASE_TOKEN/QUOTE_TOKEN must both exist in the pool)
+POOL=0x...
+ROUTER=0x...
+BASE_TOKEN=0x...
+QUOTE_TOKEN=0x...
+
+# Binance (testnet for sim, live for paper/live)
+BINANCE_TESTNET_API_KEY=...
+BINANCE_TESTNET_SECRET=...
+BINANCE_API_KEY=...
+BINANCE_SECRET=...
+
+# Telegram
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+### 4. Start a fork (required for DEX simulation)
+
+```bash
+anvil --fork-url $MAINNET_RPC_URL --port 8545
+```
+
+---
+
+## Configuration
+
+### `RUN_MODE`
+
+| Value | On-chain txs | Binance credentials | Use case |
+|-------|-------------|---------------------|----------|
+| `sim` | no | testnet | development, testing |
+| `paper` | no | live | verify real spreads without trading |
+| `live` | yes | live | production |
+
+### Pool and pair
+
+Set `BASE_TOKEN` and `QUOTE_TOKEN` to the on-chain addresses of the two tokens in your pool. The bot derives the Binance pair automatically from the token symbols (`WETH` → `ETH`). No `BOT_PAIR` env var is needed.
+
+To find a viable pool first:
+
+```bash
+npx tsx src/scripts/scan_pools.script.ts       # scan many tokens at once
+npx tsx src/scripts/find_pool.script.ts        # check a specific BASE_TOKEN/QUOTE_TOKEN pair
+npx tsx src/scripts/verify_pool.script.ts      # verify configured pool has non-zero reserves
 ```
 
 ---
@@ -324,83 +270,58 @@ PORT=3000                                                         # optional, de
 
 ## Scripts
 
-### Arb bot
+### Pool discovery
 
 ```bash
-npx tsx src/scripts/arb_bot.script.ts --dry-run --no-dex
+# Scan Uniswap V2 for TOKEN/WETH pools with Binance depth — saves scan_results.json
+npx tsx src/scripts/scan_pools.script.ts
+
+# Find a specific BASE_TOKEN/QUOTE_TOKEN pair across Uniswap V2 and SushiSwap V2
+npx tsx src/scripts/find_pool.script.ts
+
+# Verify the configured POOL has non-zero reserves and print implied price
+npx tsx src/scripts/verify_pool.script.ts
 ```
 
-See [Arb Bot](#arb-bot) section above.
-
-### Order book analysis
+### Pipeline verification
 
 ```bash
-npx tsx src/scripts/orderBook.script.ts ETH/USDT --depth 20
+# Test signing + broadcast pipeline on Sepolia (safe, no real funds)
+npx tsx src/scripts/test_dex_leg.script.ts           # gas estimate only
+npx tsx src/scripts/test_dex_leg.script.ts --send    # send 0-value self-transfer
+
+# Watch live Sync events on your configured pool
+npx tsx src/scripts/verify_sync_events.ts
+
+# Watch pending mempool swaps
+npx tsx src/scripts/verify_mempool.ts
 ```
 
-Fetches live order book and prints spread, depth at 10 bps, imbalance, walk-the-book for 2 and 10 ETH, and effective spread.
-
-### Arb checker (analysis only)
+### Market data
 
 ```bash
-npx tsx src/scripts/arb_checker.script.ts --pair ETH/USDT --size 2.0
+# Live Binance order book with depth, imbalance, and walk-the-book simulation
+npx tsx src/scripts/orderBook.script.ts ETH/USDC --depth 20
+
+# Full arb opportunity assessment — read-only, no orders placed
+npx tsx src/scripts/arb_checker.script.ts --pair ETH/USDC --size 2.0
+
+# Live Uniswap V2 pool pricing (add FORK_URL for fork-validated quotes)
+npx tsx src/scripts/pricing.script.ts
 ```
 
-Loads the Uniswap V2 USDC/WETH pool from mainnet, fetches a live Binance order book, and prints a full opportunity assessment — gap, cost breakdown, net PnL estimate, inventory check, and verdict. Does not place orders.
-
-### Place and cancel a test order
+### Account management
 
 ```bash
-npx tsx src/scripts/order.script.ts ETH/USDT
-```
-
-Places a limit buy 10% below market (won't fill), shows the open order, then cancels it.
-
-### Portfolio snapshot
-
-```bash
+# Cross-venue balance snapshot with skew report
 npx tsx src/scripts/portfolio.script.ts
-```
 
-Fetches real Binance balances + on-chain wallet ETH balance and prints a cross-venue snapshot with skew report.
-
-### PnL report
-
-```bash
-npx tsx src/scripts/pnl.script.ts --summary
-```
-
-Runs synthetic arb trades and prints win rate, total PnL, Sharpe estimate, and recent trades.
-
-### Rebalancer
-
-```bash
+# Rebalance plan with fee accounting
 npx tsx src/scripts/rebalancer.script.ts --check
 npx tsx src/scripts/rebalancer.script.ts --plan ETH
-```
 
-Shows skew report and generates a transfer plan with fee accounting.
-
-### Pricing engine
-
-```bash
-npx tsx src/scripts/pricing.script.ts
-FORK_URL=http://127.0.0.1:8545 npx tsx src/scripts/pricing.script.ts
-```
-
-Loads live Uniswap V2 pools and prints pool snapshots and ETH price derived from reserves. With `FORK_URL` set, also runs `PricingEngine.getQuote()` and prints the simulation result.
-
-### AMM math verification
-
-```bash
-./src/scripts/start_fork.sh
-npx tsx src/scripts/verify_amm.ts
-```
-
-### Mempool monitoring
-
-```bash
-npx tsx src/scripts/verify_mempool.ts
+# Place and immediately cancel a test limit order
+npx tsx src/scripts/order.script.ts ETH/USDC
 ```
 
 ---
@@ -411,4 +332,4 @@ npx tsx src/scripts/verify_mempool.ts
 npm test
 ```
 
-330 tests across all modules — chain, pricing, exchange, inventory, strategy, and executor.
+Tests live in `tests/`, mirroring `src/`. Covers chain, pricing, exchange, inventory, strategy, executor, and safety modules.

@@ -2,11 +2,7 @@ import type { Token } from '@/core/core.types';
 import type { UniswapV2Pair } from '@/pricing/uniswap-v2/uniswap-v2.service';
 import { UniswapV2Calculator } from '@/pricing/uniswap-v2/uniswap-v2.calculator';
 import { InvalidRouteError, NoRouteFoundError } from './routing.errors';
-import type { GraphEdge, RouteComparison, RouteGraph } from './routing.types';
-
-// Gas model: 150k base overhead + 100k per AMM swap hop.
-const GAS_BASE = 150_000n;
-const GAS_PER_HOP = 100_000n;
+import type { GraphEdge, RouteComparison, RouteFinderConfig, RouteGraph } from './routing.types';
 
 /**
  * Immutable snapshot of a swap path through one or more UniswapV2 pools.
@@ -18,8 +14,15 @@ const GAS_PER_HOP = 100_000n;
 export class Route {
   readonly pools: readonly UniswapV2Pair[];
   readonly path: readonly Token[];
+  private readonly gasBase: bigint;
+  private readonly gasPerHop: bigint;
 
-  constructor(pools: UniswapV2Pair[], path: Token[]) {
+  constructor(
+    pools: UniswapV2Pair[],
+    path: Token[],
+    gasBase: bigint = 150_000n,
+    gasPerHop: bigint = 100_000n,
+  ) {
     if (path.length !== pools.length + 1) {
       throw new InvalidRouteError(
         `path length (${path.length}) must be pools.length + 1 (${pools.length + 1})`,
@@ -27,6 +30,8 @@ export class Route {
     }
     this.pools = pools;
     this.path = path;
+    this.gasBase = gasBase;
+    this.gasPerHop = gasPerHop;
   }
 
   get numHops(): number {
@@ -57,9 +62,9 @@ export class Route {
     return amounts;
   }
 
-  /** ~150k base + 100k per hop, matching typical Uniswap V2 on-chain gas. */
+  /** Base + per-hop gas model matching typical Uniswap V2 on-chain gas. */
   estimateGas(): bigint {
-    return GAS_BASE + BigInt(this.pools.length) * GAS_PER_HOP;
+    return this.gasBase + BigInt(this.pools.length) * this.gasPerHop;
   }
 
   toString(): string {
@@ -83,10 +88,14 @@ export class Route {
 export class RouteFinder {
   private readonly _pools: UniswapV2Pair[];
   private readonly graph: RouteGraph;
+  private readonly gasBase: bigint;
+  private readonly gasPerHop: bigint;
 
-  constructor(pools: UniswapV2Pair[]) {
+  constructor(pools: UniswapV2Pair[], config: RouteFinderConfig = {}) {
     this._pools = [...pools];
     this.graph = this.buildGraph();
+    this.gasBase = config.gasBase ?? 150_000n;
+    this.gasPerHop = config.gasPerHop ?? 100_000n;
   }
 
   get pools(): readonly UniswapV2Pair[] {
@@ -153,7 +162,7 @@ export class RouteFinder {
         const nextVisited = new Set(visitedPools).add(pool.address.lower);
 
         if (otherToken.address.equals(tokenOut.address)) {
-          routes.push(new Route(nextPools, nextPath));
+          routes.push(new Route(nextPools, nextPath, this.gasBase, this.gasPerHop));
         } else if (nextPools.length < maxHops) {
           dfs(otherToken, nextPools, nextPath, nextVisited);
         }

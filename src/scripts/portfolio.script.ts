@@ -15,7 +15,7 @@ import { PRICE_SCALE } from '@/core/core.constants';
 import { InventoryTracker } from '@/inventory/tracker/tracker.service';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import { RebalancePlanner } from '@/inventory/rebalancer/rebalancer.service';
-import { BINANCE_PROFILE } from '@/venues/binance/binance.profile';
+import { getBinanceProfile } from '@/venues/binance/binance.profile';
 
 const SEP = '═'.repeat(50);
 const LINE = '─'.repeat(50);
@@ -28,8 +28,8 @@ function fmtAmt(v: bigint, decimals = 4): string {
 }
 
 // ── Clients ───────────────────────────────────────────────────────────────────
-const chainClient = new ChainClient([config.chain.mainnetRpcUrl]);
-const exchangeClient = new ExchangeClient(config.binance, BINANCE_PROFILE);
+const chainClient = new ChainClient([config.chain.rpcUrl]);
+const exchangeClient = new ExchangeClient(config.binance, getBinanceProfile(config.production));
 
 const wallet = WalletManager.from_env('PRIVATE_KEY');
 const walletAddress = new Address(wallet.getAddress());
@@ -102,7 +102,7 @@ if (walletEth === 0n) {
 }
 
 // ── Skew report ───────────────────────────────────────────────────────────────
-const planner = new RebalancePlanner(tracker, BINANCE_PROFILE);
+const planner = new RebalancePlanner(tracker, getBinanceProfile(config.production));
 const checks = planner.checkAll();
 const needsRebalance = checks.filter((c) => c.needsRebalance);
 

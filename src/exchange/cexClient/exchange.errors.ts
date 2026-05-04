@@ -14,3 +14,9 @@ export class ExchangeOrderError extends AppError {}
 
 /** Transient network failure communicating with the exchange. */
 export class ExchangeNetworkError extends AppError {}
+
+/** Raised when the WebSocket connection cannot be established or is lost beyond max retries. */
+export class WsConnectionError extends AppError {}
+
+/** Order rejected due to a Binance filter violation: LOT_SIZE (-1013), MIN_NOTIONAL (-1111), or PRICE_FILTER. */
+export class ExchangeFilterError extends AppError {}
