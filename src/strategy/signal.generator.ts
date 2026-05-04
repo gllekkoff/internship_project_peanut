@@ -298,7 +298,7 @@ export class SignalGenerator {
         `\tcex  bid=${px(cexBid)}  ask=${px(cexAsk)}  spread=${bps(cexSpreadBps)}\n` +
         `\tdex  sell=${px(dexSellPrice)}  buy=${px(dexBuyPrice)}  spread=${bps(dexSpreadBps)}\n` +
         `\t${pool}${warn}\n` +
-        `\tB>D=${bps(buyCexSellDexBps)}  D>B=${bps(buyDexSellCexBps)}`,
+        `\tbuyCexSellDex=${bps(buyCexSellDexBps)}  buyDexSellCex=${bps(buyDexSellCexBps)}`,
     );
   }
 }
