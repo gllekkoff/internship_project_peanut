@@ -48,7 +48,7 @@ Break-even spread is 40 bps (10 bps CEX fee + 30 bps DEX pool fee). Running at 2
 
 **Best trade:** Day 3, -$0.0081. Only $0.004 away from profit — spread was 33.6 bps, just below the 40 bps floor.
 
-**Worst trade:** Day 2, -$0.0328 (twice). Signal was already below break-even, then a 109 ARB sell hit the pool right before our DEX leg landed, adding extra slippage.
+**Worst trade:** Day 2, -$0.0328. Signal was already below break-even, then a 109 ARB sell hit the pool right before our DEX leg landed, adding extra slippage.
 
 Also lost 1 protitable trade because of `getQuote` issue with tolerance.
 
