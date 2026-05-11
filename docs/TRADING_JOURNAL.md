@@ -5,15 +5,15 @@
 ## Day 1 — 2026-05-09
 
 ### Numbers
-- Starting capital: ~$97.28 (340.78 ARB total @ $0.1394 + $46.78 USDC total + $2.96 ETH)
-- Ending capital: ~$98.14 (340.78 ARB total @ $0.1420 + $46.79 USDC total + $2.96 ETH) — +$0.86 from ARB price appreciation, not trade PnL
+- Starting capital: ~$98.23 (340.78 ARB total + $46.78 USDC total + $2.98 ETH)
+- Ending capital: ~$98.14 (340.78 ARB total + $46.79 USDC total + $2.98 ETH)
 - PnL: -$0.0161
 - Trades: 1 (0 wins, 1 loss)
 - Win rate: 0%
 - Best trade: -$0.0161
 - Worst trade: -$0.0161
 - Fees paid: ~$0.006 (CEX taker) + ~$0.018 (DEX gas) = $0.0240 total
-- Direction: `buy_dex_sell_cex`
+- Direction: Buy Dex → Sell Cex
 - Tx hash: 0x2d9a872ec0c7f086897f28751c4f98a361ea1ee93f42c3ac4aa18d3e27054f72
 
 ### What Happened
@@ -48,12 +48,12 @@
 ## Day 2 — 2026-05-10
 
 ### Numbers
-- Starting capital: ~$98.28 (340.78 ARB total @ $0.1424 + $46.79 USDC total + $2.96 ETH)
-- Ending capital: ~$98.20 (after -$0.0815 net loss across 3 trades; ARB price drift not tracked per-session)
-- PnL: -$0.0815 (-$0.0328 + -$0.0328 + -$0.0159)
+- Starting capital: ~$98.14 (340.78 ARB total @ $0.1424 + $46.79 USDC total + $2.96 ETH)
+- Ending capital: ~$98.06 
+- PnL: -$0.0568 (-$0.0328 + -$0.0159 + -$0.0081)
 - Trades: 3 (0 wins, 3 losses)
 - Win rate: 0%
-- Best trade: -$0.0159
+- Best trade: -$0.0081
 - Worst trade: -$0.0328
 - Fees paid: ~$0.0240 × 3 = $0.0720 total (CEX taker + DEX pool per trade)
 

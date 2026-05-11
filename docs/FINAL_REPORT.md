@@ -32,19 +32,19 @@ Break-even spread is 40 bps (10 bps CEX fee + 30 bps DEX pool fee). Running at 2
 
 | Metric | Value |
 |---|---|
-| Trades | 5 (0 wins, 5 losses) |
+| Trades | 4 (0 wins, 4 losses) |
 | Win rate | 0% |
 | Total PnL | -$0.1057 |
 | Fees paid | $0.12 (~$0.024/trade) |
 | Starting capital | ~$97.28 |
-| Ending capital | ~$98.19 (ARB price up +$0.91, trades lost -$0.11) |
+| Ending capital | ~$97.90 (ARB price up +$0.91, trades lost -$0.11) |
 
-| Day | Spread | Net PnL | Note |
-|---|---|---|---|
-| 1 | 27.3 bps | -$0.0328 | Another trader hit the pool in the 2s gap between CEX fill and DEX leg |
-| 2 | 13.4 bps | -$0.0159 | Way below break-even |
-| 3 | 27.3 bps | -$0.0328 | Same as first Day 2 trade |
-| 4 | 33.6 bps | -$0.0081 | Closest to break-even |
+| Day | Spread | Net PnL |
+|---|---|---|
+| 1 | 13.1 bps | -$0.0161 |
+| 2 | 27.3 bps | -$0.0328 |
+| 3 | 13.4 bps | -$0.0159 |
+| 4 | 33.6 bps | -$0.0081 |
 
 **Best trade:** Day 3, -$0.0081. Only $0.004 away from profit — spread was 33.6 bps, just below the 40 bps floor.
 
