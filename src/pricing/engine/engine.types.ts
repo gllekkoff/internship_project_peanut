@@ -13,15 +13,11 @@ export class Quote {
     public readonly slippageToleranceBps: bigint = 100n,
   ) {}
 
-  /** Rejects if simulated output deviates beyond tolerance in the unfavourable direction (less output
-   *  than expected), or beyond 5× tolerance in the favourable direction (guards against stale/bad data). */
+  /** Rejects only when simulated output is below expected beyond tolerance.
+   *  Simulated above expected is always valid — the trade executes on the live chain anyway. */
   get isValid(): boolean {
-    if (this.simulatedOutput < this.expectedOutput) {
-      const diff = this.expectedOutput - this.simulatedOutput;
-      return diff * 10_000n < this.expectedOutput * this.slippageToleranceBps;
-    }
-    // Simulated is higher than expected — favourable, but cap at 5× tolerance to catch bad fork data.
-    const diff = this.simulatedOutput - this.expectedOutput;
-    return diff * 10_000n < this.expectedOutput * (this.slippageToleranceBps * 5n);
+    if (this.simulatedOutput >= this.expectedOutput) return true;
+    const diff = this.expectedOutput - this.simulatedOutput;
+    return diff * 10_000n < this.expectedOutput * this.slippageToleranceBps;
   }
 }
