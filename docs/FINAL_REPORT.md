@@ -36,8 +36,8 @@ Break-even spread is 40 bps (10 bps CEX fee + 30 bps DEX pool fee). Running at 2
 | Win rate | 0% |
 | Total PnL | -$0.1057 |
 | Fees paid | $0.12 (~$0.024/trade) |
-| Starting capital | ~$97.28 |
-| Ending capital | ~$97.90 (ARB price up +$0.91, trades lost -$0.11) |
+| Starting capital | ~$98.23 |
+| Ending capital | ~$98.06  |
 
 | Day | Spread | Net PnL |
 |---|---|---|

@@ -814,7 +814,6 @@ export class ArbBot {
 
   private minProfitBuffer(signal: Signal): bigint {
     const configured = this.botConfig.minProfit ?? 0n;
-    // Negative minProfit = user explicitly allows losses up to that amount — respect it directly.
     if (configured < 0n) return configured;
     const tradeUsd = (signal.size * signal.cexPrice) / PRICE_SCALE;
     const notional = tradeUsd / 1_000n;
