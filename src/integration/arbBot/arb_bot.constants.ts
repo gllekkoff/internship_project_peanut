@@ -1,4 +1,13 @@
 export const BALANCE_SYNC_INTERVAL_MS = 30_000;
+
+/** Estimated gas units consumed by a single Uniswap V2 swap. */
+export const SWAP_GAS_UNITS = 180_000n;
+/** How long a fetched gas price stays valid before a fresh RPC call is made. */
+export const GAS_PRICE_TTL_MS = 30_000;
+/** Fallback gas cost in USD (PRICE_SCALE) when the RPC call fails. */
+export const GAS_COST_FALLBACK = 5n * 100_000_000n;
+/** Minimum gas cost floor in USD (PRICE_SCALE) — prevents unrealistically cheap gas from skewing PnL. */
+export const GAS_COST_MIN = 2n * 100_000_000n;
 export const DAILY_RESET_INTERVAL_MS = 60 * 60 * 1_000; // check every hour, reset triggers on UTC date change
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 

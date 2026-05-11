@@ -78,7 +78,7 @@ export const config = {
     wsUrl: requireEnv('FORK_WS_URL'),
   },
 
-  flashbotsRpcUrl: requireEnv('FLASHBOTS_RPC_URL'),
+  flashbotsRpcUrl: process.env['FLASHBOTS_RPC_URL'] ?? '',
 
   telegram: {
     botToken: requireEnv('TELEGRAM_BOT_TOKEN'),

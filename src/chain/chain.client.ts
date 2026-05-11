@@ -62,10 +62,8 @@ export class ChainClient {
 
     for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       for (const client of this.clients) {
-        const start = Date.now();
         try {
           const result = await fn(client);
-          console.debug(`[ChainClient] ${operation} ok in ${Date.now() - start}ms`);
           return result;
         } catch (e) {
           const error = e instanceof Error ? e : new Error(String(e));
@@ -132,8 +130,10 @@ export class ChainClient {
   }
 
   /** Estimates gas required to execute a transaction. */
-  async estimateGas(tx: TransactionRequest): Promise<bigint> {
-    return this.withRetry('estimateGas', (client) => client.estimateGas(toViemCallParams(tx)));
+  async estimateGas(tx: TransactionRequest, account?: Hex): Promise<bigint> {
+    return this.withRetry('estimateGas', (client) =>
+      client.estimateGas(toViemCallParams(tx, account)),
+    );
   }
 
   /**

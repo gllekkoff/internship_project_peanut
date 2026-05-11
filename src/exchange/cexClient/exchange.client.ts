@@ -155,7 +155,6 @@ export class ExchangeClient {
 
   async fetchBalance(): Promise<Record<string, AssetBalance>> {
     await this.checkWeight(this.profile.rateLimit.weights.balance);
-    log.info('fetchBalance');
 
     const raw = await this.callExchange<Balances>(() => this.exchange.fetchBalance());
     this.recordWeight(this.profile.rateLimit.weights.balance);

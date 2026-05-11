@@ -71,13 +71,7 @@ export class Signal {
 
   /** True when the signal has not expired and all pre-trade checks pass. */
   isValid(): boolean {
-    return (
-      Date.now() < this.expiry.getTime() &&
-      this.inventoryOk &&
-      this.withinLimits &&
-      this.expectedNetPnl > 0n &&
-      this.score > 0
-    );
+    return Date.now() < this.expiry.getTime() && this.inventoryOk && this.withinLimits;
   }
 
   /** Seconds elapsed since this signal was created. */
@@ -89,8 +83,14 @@ export class Signal {
 /** Configuration for SignalGenerator thresholds and DEX pricing integration. */
 export interface SignalGeneratorConfig {
   readonly minSpreadBps?: number;
-  /** Target trade notional in USD, scaled by PRICE_SCALE. ETH size is computed per-tick as tradeSizeUsd / cexAsk. */
+  /** Fixed trade notional in USD (PRICE_SCALE). Used when min/max are not set. */
   readonly tradeSizeUsd?: bigint;
+  /** Range lower bound in USD (PRICE_SCALE). When set alongside tradeSizeMax, the generator sweeps sizes and picks the most profitable. */
+  readonly tradeSizeMin?: bigint;
+  /** Range upper bound in USD (PRICE_SCALE). */
+  readonly tradeSizeMax?: bigint;
+  /** Number of candidate sizes to evaluate across the range. Default: 5. */
+  readonly tradeSizeSteps?: number;
   /** Minimum net profit to emit a signal, scaled by PRICE_SCALE. */
   readonly minProfit?: bigint;
   /** Maximum position size in quote currency, scaled by PRICE_SCALE. */

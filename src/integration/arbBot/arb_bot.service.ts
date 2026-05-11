@@ -31,22 +31,29 @@ import {
   HEARTBEAT_INTERVAL_MS,
   BASE_MISMATCH_THRESHOLD,
   QUOTE_MISMATCH_THRESHOLD,
+  SWAP_GAS_UNITS,
+  GAS_PRICE_TTL_MS,
+  GAS_COST_FALLBACK,
+  GAS_COST_MIN,
 } from '@/integration/arbBot/arb_bot.constants';
 import { RiskManager } from '@/safety/risk.service';
 import { DEFAULT_RISK_LIMITS } from '@/safety/risk.constants';
 import { absoluteSafetyCheck } from '@/safety/safety.constants';
 import { isKillSwitchActive, AutoKillSwitch, writeHeartbeat } from '@/safety/kill.switch';
 import { PreTradeValidator } from '@/safety/pre.trade.validator';
-import { makeLogger, logTrade, logError } from '@/core/core.logger';
+import { makeLogger, logError } from '@/core/core.logger';
 import { fmtUsd, fmtPrice, fmtAmt } from '@/core/core.formatters';
 import { TelegramNotifier } from '@/notifications/telegram.notifier';
 
-/** Maps on-chain token symbols to their Binance equivalents. */
+function fmtDirection(direction: string): string {
+  return direction === 'buy_dex_sell_cex' ? 'Buy DEX → Sell CEX' : 'Buy CEX → Sell DEX';
+}
+
 function toCexSymbol(symbol: string): string {
   const MAP: Record<string, string> = {
     WETH: 'ETH',
-    'USD₮0': 'USDT', // Arbitrum USDT on-chain symbol
-    'USDC.e': 'USDC', // Bridged USDC on Arbitrum
+    'USD₮0': 'USDT',
+    'USDC.e': 'USDC',
   };
   return MAP[symbol] ?? symbol;
 }
@@ -76,6 +83,10 @@ export class ArbBot {
   private readonly autoKill: AutoKillSwitch;
   private readonly telegram: TelegramNotifier;
   private dailyLossAlerted = false;
+  private circuitBreakerNotified = false;
+  private dailyTradeCount = 0;
+  private dailyNetPnl = 0n;
+  private dailyWins = 0;
 
   private generator!: SignalGenerator;
   private executor!: Executor;
@@ -89,7 +100,7 @@ export class ArbBot {
   private activePair = 'ETH/USDC';
   private tickState: BotState = BotState.IDLE;
   private stopping = false;
-  private readonly lastTopOfBook: Map<string, { bid: bigint; ask: bigint }> = new Map();
+  private readonly tickTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private lastResetDay = new Date().getUTCDate();
   private stopResolve: (() => void) | null = null;
   private gasCache: { cost: bigint; ts: number } | null = null;
@@ -99,9 +110,7 @@ export class ArbBot {
     this.venueProfile = getBinanceProfile(envConfig.production);
     this.exchange = new ExchangeClient(envConfig.binance, this.venueProfile);
     this.chainClient = new ChainClient([envConfig.chain.rpcUrl], 30, 3, viemChain);
-    this.flashbotsChainClient = envConfig.production
-      ? new ChainClient([envConfig.flashbotsRpcUrl], 30, 3, viemChain)
-      : null;
+    this.flashbotsChainClient = null;
     this.pricingEngine = new PricingEngine(
       this.chainClient,
       envConfig.fork.rpcUrl,
@@ -115,7 +124,6 @@ export class ArbBot {
     this.planner = new RebalancePlanner(this.inventory, this.venueProfile);
     this.pnl = new PnLEngine();
 
-    // FeeCalculator is finalised in initialize() once the pool's feeBps is known.
     this.fees = new FeeCalculator({
       cexTakerBps: envConfig.binance.cexFeeBps,
       dexSwapBps: 30,
@@ -126,7 +134,6 @@ export class ArbBot {
       excellentSpreadBps: 100,
       minSpreadBps: botConfig.minSpreadBps,
     });
-    // Capital is 0n here; setInitialCapital() is called in run() after balances are synced.
     this.riskManager = new RiskManager(botConfig.riskLimits ?? DEFAULT_RISK_LIMITS, 0n);
     this.preTrade = new PreTradeValidator();
     this.autoKill = new AutoKillSwitch();
@@ -176,7 +183,6 @@ export class ArbBot {
       `Pool loaded: ${baseToken.symbol}/${quoteToken.symbol} feeBps=${pool.feeBps} → CEX pair ${this.activePair}`,
     );
 
-    // Rebuild FeeCalculator with the real pool fee now that the pool is loaded.
     this.fees = new FeeCalculator({
       cexTakerBps: envConfig.binance.cexFeeBps,
       dexSwapBps: Number(pool.feeBps),
@@ -203,7 +209,13 @@ export class ArbBot {
       {
         minSpreadBps: this.botConfig.minSpreadBps,
         tradeSizeUsd: this.botConfig.tradeSizeUsd,
-        minProfit: 0n * PRICE_SCALE,
+        ...(this.botConfig.tradeSizeMin !== undefined
+          ? { tradeSizeMin: this.botConfig.tradeSizeMin }
+          : {}),
+        ...(this.botConfig.tradeSizeMax !== undefined
+          ? { tradeSizeMax: this.botConfig.tradeSizeMax }
+          : {}),
+        minProfit: this.botConfig.minProfit ?? 0n,
         maxPosition: 20_000n * PRICE_SCALE,
         cooldownMs: this.botConfig.cooldownMs,
         senderAddress,
@@ -220,7 +232,7 @@ export class ArbBot {
       this.venueProfile,
       {
         simulationMode: this.botConfig.simulationMode,
-        useFlashbots: envConfig.production,
+        useFlashbots: false,
         router: new Address(envConfig.dex.router),
         pairTokens,
         tradingRules,
@@ -238,16 +250,24 @@ export class ArbBot {
     await this.syncBalances();
 
     await this.initialize();
+    await this.syncBalances();
 
     this.startingCapital = this.computeCapitalFromInventory(this.basePair, this.quotePair);
     this.riskManager.setInitialCapital(this.startingCapital);
     log.info(
       `Initial capital: ${fmtUsd(this.startingCapital)} (${this.basePair} wallet + ${this.quotePair} CEX)`,
     );
+    this.logRebalancePlans();
 
     this.exchange.subscribeDepth(this.activePair, (book) => {
       this.latestBooks.set(this.activePair, book);
-      void this.tick(this.activePair, book);
+      const existing = this.tickTimers.get(this.activePair);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(() => {
+        this.tickTimers.delete(this.activePair);
+        void this.tick(this.activePair, book);
+      }, 50);
+      this.tickTimers.set(this.activePair, timer);
     });
     this.exchange.subscribeTrades(this.activePair, (trade) => {
       this.onTradeUpdate(this.activePair, trade);
@@ -270,6 +290,31 @@ export class ArbBot {
         : 'testnet';
     const walletBase = this.inventory.getAvailable(Venue.WALLET, this.basePair);
     const cexQuote = this.inventory.getAvailable(Venue.BINANCE, this.quotePair);
+
+    const minProfitUsd = Number(this.botConfig.minProfit ?? 0n) / PRICE_SCALE_NUM;
+    const tradeSizeMinUsd =
+      Number(this.botConfig.tradeSizeMin ?? this.botConfig.tradeSizeUsd) / PRICE_SCALE_NUM;
+    const tradeSizeMaxUsd =
+      Number(this.botConfig.tradeSizeMax ?? this.botConfig.tradeSizeUsd) / PRICE_SCALE_NUM;
+    const sizeLabel =
+      tradeSizeMinUsd === tradeSizeMaxUsd
+        ? `$${tradeSizeMinUsd.toFixed(2)}`
+        : `$${tradeSizeMinUsd.toFixed(2)} – $${tradeSizeMaxUsd.toFixed(2)} (sweep)`;
+
+    const settingsLine =
+      `Settings:\n` +
+      `  Trade size: ${sizeLabel}\n` +
+      `  Min spread: ${this.botConfig.minSpreadBps} bps\n` +
+      `  Min score: ${this.botConfig.minScore}\n` +
+      `  Min profit: ${minProfitUsd >= 0 ? '+' : ''}$${minProfitUsd.toFixed(2)}\n` +
+      `  Cooldown: ${this.botConfig.cooldownMs} ms`;
+
+    log.info(
+      `Settings — trade size: ${sizeLabel} | spread: ${this.botConfig.minSpreadBps}bps` +
+        ` | score: ${this.botConfig.minScore} | min profit: ${minProfitUsd >= 0 ? '+' : ''}$${minProfitUsd.toFixed(2)}` +
+        ` | cooldown: ${this.botConfig.cooldownMs}ms`,
+    );
+
     await this.telegram.sendControlPanel(
       `Bot started ✅\n` +
         `Pair: ${this.activePair}\n` +
@@ -277,6 +322,7 @@ export class ArbBot {
         `Wallet: ${fmtAmt(walletBase)} ${this.basePair}\n` +
         `CEX: ${fmtUsd(cexQuote)} ${this.quotePair}\n` +
         `Total capital: ${fmtUsd(this.startingCapital)}\n\n` +
+        `${settingsLine}\n\n` +
         `Use /stop or the button below to shut down.`,
     );
 
@@ -285,7 +331,7 @@ export class ArbBot {
     }, BALANCE_SYNC_INTERVAL_MS);
 
     const resetTimer = setInterval(() => {
-      this.maybeDailyReset();
+      void this.maybeDailyReset();
     }, DAILY_RESET_INTERVAL_MS);
 
     writeHeartbeat();
@@ -306,12 +352,6 @@ export class ArbBot {
   }
 
   private async tick(pair: string, book: OrderBook): Promise<void> {
-    const prev = this.lastTopOfBook.get(pair);
-    const bid = book.bestBid[0];
-    const ask = book.bestAsk[0];
-    if (prev && prev.bid === bid && prev.ask === ask) return;
-    this.lastTopOfBook.set(pair, { bid, ask });
-
     if (!this.checkSafetyGates()) return;
     if (this.tickState !== BotState.IDLE) return;
     this.tickState = BotState.GENERATING;
@@ -329,7 +369,11 @@ export class ArbBot {
         pair,
         error: e instanceof Error ? e.message : String(e),
       });
-      this.autoKill.recordError();
+      // Only count execution failures toward auto-kill — transient network/data errors
+      // during signal generation should not permanently stop the bot.
+      if (this.tickState === BotState.EXECUTING) {
+        this.autoKill.recordError();
+      }
     } finally {
       this.tickState = BotState.IDLE;
     }
@@ -362,50 +406,52 @@ export class ArbBot {
 
     const preCheck = this.preTrade.validateSignal(signal);
     if (!preCheck.allowed) {
-      log.warn(`  → Pre-trade validation failed: ${preCheck.reason}`);
+      log.debug(`[${pair}] pre-trade validation failed: ${preCheck.reason}`);
       return null;
     }
 
     const [base = '', quote = ''] = pair.split('/');
     const checks = this.planner.checkAll();
-    log.info(
-      `  balance: ${base}@wallet = ${fmtAmt(this.inventory.getAvailable(Venue.WALLET, base))}` +
-        `  ${quote}@cex = ${fmtUsd(this.inventory.getAvailable(Venue.BINANCE, quote))}`,
-    );
     for (const check of checks) {
       if (check.needsRebalance && (check.asset === base || check.asset === quote)) {
-        log.warn(
-          `  → Rebalance needed: ${check.asset} skew = ${check.maxDeviationPct.toFixed(1)}%`,
-        );
+        log.warn(`Rebalance needed: ${check.asset} skew=${check.maxDeviationPct.toFixed(1)}%`);
       }
     }
 
     const rawScore = this.scorer.score(signal, checks);
     const score = this.scorer.applyDecay(signal, rawScore);
     const size = Number(signal.size) / PRICE_SCALE_NUM;
-    log.info(`Signal [${signal.signalId}] ${pair} ${size} ${base} — ${signal.direction}`);
-    log.info(
-      `  prices : cex = ${fmtPrice(signal.cexPrice)}  dex = ${fmtPrice(signal.dexPrice)}  spread = ${signal.spreadBps.toFixed(1)}bps`,
-    );
-    log.info(
-      `  pnl    : gross = ${fmtUsd(signal.expectedGrossPnl)}  fees = ${fmtUsd(signal.expectedFees)}  net = ${fmtUsd(signal.expectedNetPnl)}`,
-    );
-    log.info(
-      `  score  : ${score.toFixed(0)} (raw = ${rawScore.toFixed(1)}, threshold = ${this.botConfig.minScore})`,
-    );
 
     if (score < this.botConfig.minScore) {
-      log.info('  → Skipped: score below threshold');
+      log.debug(
+        `[${pair}] SKIP score=${score.toFixed(0)}<${this.botConfig.minScore}` +
+          ` spread=${signal.spreadBps.toFixed(1)}bps net=${fmtUsd(signal.expectedNetPnl)}`,
+      );
       return null;
     }
 
     const minProfit = this.minProfitBuffer(signal);
     if (signal.expectedNetPnl < minProfit) {
-      log.info(
-        `  → Skipped: net PnL ${fmtUsd(signal.expectedNetPnl)} below buffer ${fmtUsd(minProfit)}`,
+      log.debug(
+        `[${pair}] SKIP net=${fmtUsd(signal.expectedNetPnl)} below buffer=${fmtUsd(minProfit)}` +
+          ` spread=${signal.spreadBps.toFixed(1)}bps score=${score.toFixed(0)}`,
       );
       return null;
     }
+
+    log.info('─'.repeat(60));
+    log.info(`SIGNAL — ${pair} ${signal.direction}`);
+    log.info(`  Signal ID  : ${signal.signalId}`);
+    log.info(`  Size       : ${size.toFixed(4)} ${base}`);
+    log.info(`  CEX price  : ${fmtPrice(signal.cexPrice)}`);
+    log.info(`  DEX price  : ${fmtPrice(signal.dexPrice)}`);
+    log.info(`  Spread     : ${signal.spreadBps.toFixed(1)} bps`);
+    log.info(`  Gross PnL  : ${fmtUsd(signal.expectedGrossPnl)}`);
+    log.info(`  Fees       : ${fmtUsd(signal.expectedFees)}`);
+    log.info(`  Net PnL    : ${fmtUsd(signal.expectedNetPnl)}`);
+    log.info(`  Score      : ${score.toFixed(0)} / 100 (threshold ${this.botConfig.minScore})`);
+    log.info(`  Expires    : ${signal.expiry.toISOString()}`);
+    log.info('─'.repeat(60));
 
     return signal;
   }
@@ -443,20 +489,25 @@ export class ArbBot {
   }
 
   private runDryRun(signal: Signal): void {
+    const [base = ''] = signal.pair.split('/');
     const size = Number(signal.size) / PRICE_SCALE_NUM;
     log.info(
       `DRY RUN | Would trade: ${signal.pair} ${signal.direction}` +
-        ` size = ${size.toFixed(4)} spread = ${signal.spreadBps.toFixed(1)}bps` +
+        ` size = ${size.toFixed(4)} ${base} spread = ${signal.spreadBps.toFixed(1)}bps` +
         ` expected_pnl = ${fmtUsd(signal.expectedNetPnl)}`,
     );
     this.riskManager.recordTrade(signal.expectedNetPnl);
     this.pnl.record(signalToArbRecord(signal));
-    const summary = this.pnl.summary();
+    this.dailyTradeCount++;
+    this.dailyNetPnl += signal.expectedNetPnl;
+    if (signal.expectedNetPnl > 0n) this.dailyWins++;
+    const sessionNetUsd = Number(this.dailyNetPnl) / PRICE_SCALE_NUM;
     void this.telegram.send(
-      `[DRY RUN] Would trade: ${signal.pair} ${signal.direction}\n` +
-        `Size: ${size.toFixed(4)} ETH | Spread: ${signal.spreadBps.toFixed(1)}bps\n` +
+      `[DRY RUN] Would trade: ${signal.pair}\n` +
+        `Direction: ${fmtDirection(signal.direction)}\n` +
+        `Size: ${size.toFixed(4)} ${base} | Spread: ${signal.spreadBps.toFixed(1)}bps\n` +
         `Expected PnL: ${fmtUsd(signal.expectedNetPnl)}\n` +
-        `Session: ${summary.totalTrades} signals | total ${fmtUsd(summary.totalPnlUsd)}`,
+        `Session: ${this.dailyTradeCount} signals | ${sessionNetUsd >= 0 ? '+' : ''}$${sessionNetUsd.toFixed(4)} net`,
     );
   }
 
@@ -467,69 +518,102 @@ export class ArbBot {
 
     const freshSignal = await this.generator.peek(pair, this.latestBooks.get(pair) ?? book);
     if (!freshSignal || freshSignal.expectedNetPnl < minProfit) {
-      log.info('  → Skipped: opportunity gone by execution time');
+      log.debug(`[${pair}] opportunity gone by execution time`);
       return;
     }
 
-    log.info(`  → Executing ${size} ${base}`);
-    const ctx = await this.executor.execute(signal);
+    if (this.executor.isCircuitBreakerOpen()) {
+      const resetSec = Math.ceil(this.executor.circuitBreakerResetMs() / 1000);
+      if (!this.circuitBreakerNotified) {
+        this.circuitBreakerNotified = true;
+        log.warn(`Circuit breaker open — skipping trades for ~${resetSec}s`);
+        void this.telegram.send(
+          `⚠️ Circuit breaker tripped\nToo many failed trades.\nWaiting ~${Math.ceil(resetSec / 60)} min before retrying.`,
+          true,
+        );
+      } else {
+        log.debug(`Circuit breaker open — ${resetSec}s remaining`);
+      }
+      return;
+    }
+    this.circuitBreakerNotified = false;
+
+    log.info(`[${pair}] EXECUTING ${size.toFixed(4)} ${base}`);
+    const ctx = await this.executor.execute(freshSignal);
     this.scorer.recordResult(pair, ctx.state === ExecutorState.DONE);
 
     if (ctx.state === ExecutorState.DONE) {
       const netPnl = ctx.actualNetPnlUsd ?? 0n;
       this.riskManager.recordTrade(netPnl);
       this.pnl.record(executionToArbRecord(ctx));
+      this.dailyTradeCount++;
+      this.dailyNetPnl += netPnl;
+      if (netPnl > 0n) this.dailyWins++;
       const summary = this.pnl.summary();
       const risk = this.riskManager.status();
-      logTrade(log, {
-        pair: signal.pair,
-        direction: signal.direction,
-        size: Number(signal.size) / PRICE_SCALE_NUM,
-        spreadBps: Number(signal.spreadBps),
-        pnlUsd: Number(netPnl) / PRICE_SCALE_NUM,
-        state: ctx.state,
-      });
-      log.info(
-        `session: trades = ${summary.totalTrades} pnl = ${fmtUsd(summary.totalPnlUsd)} win = ${(summary.winRate * 100).toFixed(0)}%` +
-          ` | risk: daily = ${risk.dailyPnlUsd.toFixed(2)} drawdown = ${risk.drawdownPct.toFixed(1)}%`,
-      );
       const pnlUsd = Number(netPnl) / PRICE_SCALE_NUM;
+      const winRate = (summary.winRate * 100).toFixed(0);
+
+      log.info('─'.repeat(60));
+      log.info(`TRADE COMPLETE — ${signal.pair} ${signal.direction}`);
+      log.info(`  Signal ID  : ${signal.signalId}`);
+      log.info(`  Size       : ${size.toFixed(4)} ${base}`);
+      log.info(`  CEX price  : ${fmtPrice(signal.cexPrice)}`);
+      log.info(`  DEX price  : ${fmtPrice(signal.dexPrice)}`);
+      log.info(`  Spread     : ${signal.spreadBps.toFixed(1)} bps`);
+      log.info(`  Gross PnL  : ${fmtUsd(signal.expectedGrossPnl)}`);
+      log.info(`  Fees       : ${fmtUsd(signal.expectedFees)}`);
+      log.info(`  Net PnL    : ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(4)}`);
+      log.info(
+        `  Session    : ${summary.totalTrades} trades | total ${fmtUsd(summary.totalPnlUsd)} | win ${winRate}%`,
+      );
+      log.info(
+        `  Risk       : daily=${risk.dailyPnlUsd.toFixed(4)} drawdown=${risk.drawdownPct.toFixed(1)}%`,
+      );
+      log.info('─'.repeat(60));
+
+      const sessionNetUsd = Number(this.dailyNetPnl) / PRICE_SCALE_NUM;
+      const sessionWinRate =
+        this.dailyTradeCount > 0 ? ((this.dailyWins / this.dailyTradeCount) * 100).toFixed(0) : '0';
       void this.telegram.send(
-        `Trade completed: ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}\n` +
-          `Pair: ${signal.pair} | ${signal.direction}\n` +
-          `Session: ${summary.totalTrades} trades | total $${(Number(summary.totalPnlUsd) / PRICE_SCALE_NUM).toFixed(2)}`,
+        `✅ Trade completed\n\n` +
+          `Pair: ${signal.pair}\n` +
+          `Direction: ${fmtDirection(signal.direction)}\n` +
+          `Size: ${size.toFixed(4)} ${base}\n\n` +
+          `CEX price: ${fmtPrice(signal.cexPrice)}\n` +
+          `DEX price: ${fmtPrice(signal.dexPrice)}\n` +
+          `Spread: ${signal.spreadBps.toFixed(1)} bps\n\n` +
+          `Gross PnL: ${fmtUsd(signal.expectedGrossPnl)}\n` +
+          `Fees: ${fmtUsd(signal.expectedFees)}\n` +
+          `Net PnL: ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(4)}\n\n` +
+          `Session: ${this.dailyTradeCount} trades | ${sessionNetUsd >= 0 ? '+' : ''}$${sessionNetUsd.toFixed(4)} net | ${sessionWinRate}% win rate`,
       );
     } else {
-      logTrade(log, {
-        pair: signal.pair,
-        direction: signal.direction,
-        size: Number(signal.size) / PRICE_SCALE_NUM,
-        spreadBps: Number(signal.spreadBps),
-        pnlUsd: 0,
-        state: ctx.state,
-      });
-      if (ctx.error === 'Circuit breaker open') {
-        void this.telegram.send(`Circuit breaker tripped!\nPair: ${signal.pair}`, true);
-      }
+      const failMsg = `TRADE FAILED — state=${ctx.state}${ctx.error ? ` error=${ctx.error}` : ''}`;
+      log.warn(`[${pair}] ${failMsg}`);
+      void this.telegram.send(
+        `❌ Trade failed\n\n` +
+          `Pair: ${signal.pair}\n` +
+          `Direction: ${fmtDirection(signal.direction)}\n` +
+          `Size: ${size.toFixed(4)} ${base}\n\n` +
+          `State: ${ctx.state}\n` +
+          (ctx.error ? `Error: ${ctx.error}` : ''),
+        true,
+      );
     }
 
-    await this.verifyBalances(base, quote);
+    if (ctx.state === ExecutorState.DONE) {
+      await this.verifyBalances(base, quote);
+    } else {
+      // Failed trades are unwound back to the original position — just resync inventory.
+      await this.syncBalances();
+    }
     const baseAfter = this.inventory.getAvailable(Venue.WALLET, base);
     const quoteAfter = this.inventory.getAvailable(Venue.BINANCE, quote);
-    log.info(
-      `  post-trade: ${base}@wallet=${fmtAmt(baseAfter)}  ${quote}@cex=${fmtUsd(quoteAfter)}`,
+    log.debug(
+      `[${pair}] post-trade: ${base}@wallet=${fmtAmt(baseAfter)}  ${quote}@cex=${fmtUsd(quoteAfter)}`,
     );
-    for (const check of this.planner.checkAll()) {
-      if (check.needsRebalance && (check.asset === base || check.asset === quote)) {
-        const bal =
-          check.asset === base
-            ? `${fmtAmt(this.inventory.getAvailable(Venue.WALLET, base))}@wallet`
-            : `${fmtUsd(this.inventory.getAvailable(Venue.BINANCE, quote))}@cex`;
-        log.warn(
-          `  → Rebalance needed: ${check.asset}=${bal} skew=${check.maxDeviationPct.toFixed(1)}%`,
-        );
-      }
-    }
+    this.logRebalancePlans();
   }
 
   private onTradeUpdate(pair: string, trade: TradeEvent): void {
@@ -540,14 +624,34 @@ export class ArbBot {
     }
   }
 
-  private maybeDailyReset(): void {
+  private async maybeDailyReset(): Promise<void> {
     const today = new Date().getUTCDate();
-    if (today !== this.lastResetDay) {
-      this.lastResetDay = today;
-      this.riskManager.resetDaily();
-      this.dailyLossAlerted = false;
-      log.info('Daily risk counters reset');
-    }
+    if (today === this.lastResetDay) return;
+
+    const trades = this.dailyTradeCount;
+    const pnl = this.dailyNetPnl;
+    const wins = this.dailyWins;
+    const pnlUsd = Number(pnl) / PRICE_SCALE_NUM;
+    const winRate = trades > 0 ? ((wins / trades) * 100).toFixed(0) : '—';
+    const risk = this.riskManager.status();
+
+    log.info(
+      `Daily reset — trades: ${trades}  pnl: ${fmtUsd(pnl)}  win: ${winRate}%  drawdown: ${risk.drawdownPct.toFixed(1)}%`,
+    );
+    await this.telegram.send(
+      `Daily summary 📊\n` +
+        `Trades: ${trades}\n` +
+        `PnL: ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}\n` +
+        `Win rate: ${winRate}%\n` +
+        `Drawdown: ${risk.drawdownPct.toFixed(1)}%`,
+    );
+
+    this.lastResetDay = today;
+    this.riskManager.resetDaily();
+    this.dailyTradeCount = 0;
+    this.dailyNetPnl = 0n;
+    this.dailyWins = 0;
+    this.dailyLossAlerted = false;
   }
 
   private async verifyBalances(base: string, quote: string): Promise<void> {
@@ -582,8 +686,6 @@ export class ArbBot {
 
   private computeCapitalFromInventory(base: string, quote: string): bigint {
     if (!this.loadedPool || !this.baseToken || !this.quoteToken) return 0n;
-    const baseBalance = this.inventory.getAvailable(Venue.WALLET, base);
-    const cexQuote = this.inventory.getAvailable(Venue.BINANCE, quote);
 
     const pool = this.loadedPool;
     const baseIsToken0 = pool.token0.address.lower === this.baseToken.address.lower;
@@ -597,8 +699,16 @@ export class ArbBot {
       baseReserve > 0n
         ? (quoteReserve * 10n ** baseDecimals * PRICE_SCALE) / (baseReserve * 10n ** quoteDecimals)
         : 0n;
-    const baseValueUsd = (baseBalance * basePriceUsd) / PRICE_SCALE;
-    return baseValueUsd + cexQuote;
+
+    // Sum all base and quote holdings across both venues.
+    const totalBase =
+      this.inventory.getAvailable(Venue.WALLET, base) +
+      this.inventory.getAvailable(Venue.BINANCE, base);
+    const totalQuote =
+      this.inventory.getAvailable(Venue.WALLET, quote) +
+      this.inventory.getAvailable(Venue.BINANCE, quote);
+
+    return (totalBase * basePriceUsd) / PRICE_SCALE + totalQuote;
   }
 
   private async syncBalances(): Promise<void> {
@@ -607,10 +717,16 @@ export class ArbBot {
       this.exchange.fetchBalance().then((b) => this.inventory.updateFromCex(Venue.BINANCE, b)),
       this.syncWalletBalances(walletAddr),
     ]);
-    const base = this.inventory.getAvailable(Venue.WALLET, this.basePair);
-    const quote = this.inventory.getAvailable(Venue.BINANCE, this.quotePair);
+    const baseWallet = this.inventory.getAvailable(Venue.WALLET, this.basePair);
+    const quoteWallet = this.inventory.getAvailable(Venue.WALLET, this.quotePair);
+    const baseCex = this.inventory.getAvailable(Venue.BINANCE, this.basePair);
+    const quoteCex = this.inventory.getAvailable(Venue.BINANCE, this.quotePair);
     log.info(
-      `balance: ${this.basePair}@wallet = ${fmtAmt(base)}  ${this.quotePair}@cex = ${fmtUsd(quote)}`,
+      `Balance: ` +
+        `${this.basePair}@wallet: ${fmtAmt(baseWallet)}  ` +
+        `${this.quotePair}@wallet: ${fmtUsd(quoteWallet)}  ` +
+        `${this.basePair}@cex: ${fmtAmt(baseCex)}  ` +
+        `${this.quotePair}@cex: ${fmtUsd(quoteCex)}`,
     );
   }
 
@@ -645,19 +761,14 @@ export class ArbBot {
   }
 
   private async estimateGasCostUsd(): Promise<bigint> {
-    const GAS_UNITS = 180_000n;
-    const CACHE_TTL_MS = 30_000;
-    const FALLBACK = 5n * PRICE_SCALE;
-    const MIN_GAS = 2n * PRICE_SCALE;
-
-    if (this.gasCache && Date.now() - this.gasCache.ts < CACHE_TTL_MS) {
+    if (this.gasCache && Date.now() - this.gasCache.ts < GAS_PRICE_TTL_MS) {
       return this.gasCache.cost;
     }
     try {
-      if (!this.loadedPool || !this.baseToken || !this.quoteToken) return FALLBACK;
+      if (!this.loadedPool || !this.baseToken || !this.quoteToken) return GAS_COST_FALLBACK;
 
       const gasPrice = await this.chainClient.getGasPrice();
-      const gasFeeWei = gasPrice.getMaxFee('medium') * GAS_UNITS;
+      const gasFeeWei = gasPrice.getMaxFee('medium') * SWAP_GAS_UNITS;
 
       const pool = this.loadedPool;
       const baseIsToken0 = pool.token0.address.lower === this.baseToken.address.lower;
@@ -665,32 +776,51 @@ export class ArbBot {
       const quoteReserve = baseIsToken0 ? pool.reserve1 : pool.reserve0;
       const baseDecimals = BigInt(this.baseToken.decimals);
       const quoteDecimals = BigInt(this.quoteToken.decimals);
-      if (baseReserve === 0n) return FALLBACK;
+      if (baseReserve === 0n) return GAS_COST_FALLBACK;
 
       const ethPriceUsd =
         (quoteReserve * 10n ** baseDecimals * PRICE_SCALE) / (baseReserve * 10n ** quoteDecimals);
       const gasCostEthScaled = (gasFeeWei * PRICE_SCALE) / 10n ** 18n;
       const cost = (gasCostEthScaled * ethPriceUsd) / PRICE_SCALE;
-      const result = cost > MIN_GAS ? cost : MIN_GAS;
+      const result = cost > GAS_COST_MIN ? cost : GAS_COST_MIN;
       this.gasCache = { cost: result, ts: Date.now() };
       return result;
     } catch {
-      return this.gasCache?.cost ?? FALLBACK;
+      return this.gasCache?.cost ?? GAS_COST_FALLBACK;
     }
   }
 
+  private logRebalancePlans(): void {
+    const allPlans = this.planner.planAll();
+    const entries = Object.entries(allPlans);
+    if (entries.length === 0) return;
+
+    const lines: string[] = ['Rebalance recommended:'];
+    for (const [asset, plans] of entries) {
+      for (const p of plans) {
+        const amtUsd = Number(p.amount) / PRICE_SCALE_NUM;
+        const feeUsd = Number(p.estimatedFee) / PRICE_SCALE_NUM;
+        const line =
+          `  ${asset}: ${p.fromVenue} → ${p.toVenue}` +
+          ` $${amtUsd.toFixed(2)}` +
+          (p.estimatedFee > 0n ? ` (fee $${feeUsd.toFixed(2)})` : '') +
+          (p.estimatedTimeMin > 0 ? ` ~${p.estimatedTimeMin}min` : '');
+        log.warn(line);
+        lines.push(line.trimStart());
+      }
+    }
+    void this.telegram.send(`⚠️ ${lines.join('\n')}`, true);
+  }
+
   private minProfitBuffer(signal: Signal): bigint {
+    const configured = this.botConfig.minProfit ?? 0n;
+    // Negative minProfit = user explicitly allows losses up to that amount — respect it directly.
+    if (configured < 0n) return configured;
     const tradeUsd = (signal.size * signal.cexPrice) / PRICE_SCALE;
-    const fixed = 3n * PRICE_SCALE;
     const notional = tradeUsd / 1_000n;
     const feeBuffer = signal.expectedFees / 2n;
-    return fixed > notional
-      ? fixed > feeBuffer
-        ? fixed
-        : feeBuffer
-      : notional > feeBuffer
-        ? notional
-        : feeBuffer;
+    const dynamic = notional > feeBuffer ? notional : feeBuffer;
+    return configured > dynamic ? configured : dynamic;
   }
 
   async stop(): Promise<void> {

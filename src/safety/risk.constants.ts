@@ -11,7 +11,7 @@ export const DEFAULT_RISK_LIMITS: RiskLimits = {
   maxDailyLoss: 15n * PRICE_SCALE,
   maxDrawdownPct: 0.2,
   maxTradesPerHour: 20,
-  consecutiveLossLimit: 3,
+  consecutiveLossLimit: 1,
 };
 
 /** Relaxed risk limits for testnet — larger trade sizes to exercise the full pipeline. */

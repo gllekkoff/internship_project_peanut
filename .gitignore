@@ -8,5 +8,3 @@ logs/
 
 .claude/
 graphify-out/
-
-docs/*.md

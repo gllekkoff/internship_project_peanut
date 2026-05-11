@@ -14,7 +14,6 @@ export function _resetKillSwitchCacheForTesting(): void {
 
 export const ERROR_WINDOW_MS = 60 * 60 * 1_000;
 export const MAX_ERRORS_PER_HOUR = 50;
-/** Stop trading when capital drops below this fraction of initial capital. */
 export const CAPITAL_FLOOR_PCT = 0.5;
 
 /**

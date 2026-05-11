@@ -18,10 +18,13 @@ function writeLine(line: string): void {
 }
 
 function ts(): string {
-  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+  return new Date().toLocaleString('sv').replace('T', ' ');
 }
 
+const DEBUG_ENABLED = process.env['LOG_LEVEL'] === 'debug';
+
 export type Logger = {
+  debug: (msg: string) => void;
   info: (msg: string) => void;
   warn: (msg: string) => void;
   error: (msg: string) => void;
@@ -36,6 +39,9 @@ export function makeLogger(module: string): Logger {
     writeLine(line);
   };
   return {
+    debug: (msg) => {
+      if (DEBUG_ENABLED) emit('DEBUG', console.log, msg);
+    },
     info: (msg) => emit('INFO ', console.log, msg),
     warn: (msg) => emit('WARN ', console.warn, msg),
     error: (msg) => emit('ERROR', console.error, msg),

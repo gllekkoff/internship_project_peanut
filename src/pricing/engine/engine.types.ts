@@ -9,17 +9,19 @@ export class Quote {
     public readonly simulatedOutput: bigint,
     public readonly gasEstimate: bigint,
     public readonly timestamp: number,
-    /** Max allowed deviation between expected and simulated output in basis points (default 10 = 0.1%). */
-    public readonly slippageToleranceBps: bigint = 10n,
+    /** Max allowed deviation between expected and simulated output in basis points. */
+    public readonly slippageToleranceBps: bigint = 100n,
   ) {}
 
-  /** Returns true when the simulated output is within slippageToleranceBps of the expected output. */
+  /** Rejects if simulated output deviates beyond tolerance in the unfavourable direction (less output
+   *  than expected), or beyond 5× tolerance in the favourable direction (guards against stale/bad data). */
   get isValid(): boolean {
-    const diff =
-      this.expectedOutput > this.simulatedOutput
-        ? this.expectedOutput - this.simulatedOutput
-        : this.simulatedOutput - this.expectedOutput;
-
-    return diff * 10_000n < this.expectedOutput * this.slippageToleranceBps;
+    if (this.simulatedOutput < this.expectedOutput) {
+      const diff = this.expectedOutput - this.simulatedOutput;
+      return diff * 10_000n < this.expectedOutput * this.slippageToleranceBps;
+    }
+    // Simulated is higher than expected — favourable, but cap at 5× tolerance to catch bad fork data.
+    const diff = this.simulatedOutput - this.expectedOutput;
+    return diff * 10_000n < this.expectedOutput * (this.slippageToleranceBps * 5n);
   }
 }

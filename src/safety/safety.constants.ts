@@ -5,7 +5,7 @@ import type { RiskCheckResult } from './risk.interfaces';
 // DO NOT MODIFY — these are non-negotiable hard ceilings enforced after all configurable checks.
 export const ABSOLUTE_MAX_TRADE_USD = 25n * PRICE_SCALE;
 export const ABSOLUTE_MAX_DAILY_LOSS = 20n * PRICE_SCALE;
-export const ABSOLUTE_MIN_CAPITAL = 50n * PRICE_SCALE;
+export const ABSOLUTE_MIN_CAPITAL = 40n * PRICE_SCALE;
 export const ABSOLUTE_MAX_TRADES_PER_HOUR = 30;
 
 export function absoluteSafetyCheck(

@@ -59,10 +59,29 @@ export class ForkSimulator {
     }
   }
 
-  /** Simulates a Route by building the token address path from Route.path and calling the stored router via eth_call. */
+  /** Simulates a full swap via eth_call against the fork — requires token approvals to be set on the fork first. */
   async simulateRoute(route: Route, amountIn: bigint, sender: Address): Promise<SimulationResult> {
     const path = route.path.map((t) => t.address.value as `0x${string}`);
-    return this.simulateSwap(this.router, amountIn, path, sender);
+    const deadline = BigInt(Math.floor(Date.now() / 1000)) + DEFAULT_DEADLINE_OFFSET;
+    try {
+      const { result: amounts } = await this.client.simulateContract({
+        address: this.router.value as Hex,
+        abi: ROUTER_ABI,
+        functionName: 'swapExactTokensForTokens',
+        args: [amountIn, SIMULATION_AMOUNT_OUT_MIN, path, sender.value as Hex, deadline],
+        account: sender.value as Hex,
+      });
+      const amountOut = amounts.at(-1) ?? 0n;
+      return { success: true, amountOut, gasUsed: 0n, error: null, logs: [] };
+    } catch (e) {
+      return {
+        success: false,
+        amountOut: 0n,
+        gasUsed: 0n,
+        error: e instanceof Error ? e.message : String(e),
+        logs: [],
+      };
+    }
   }
 
   /** Compares UniswapV2Calculator's getAmountOut against the router's getAmountsOut on the fork — validates our AMM math. */

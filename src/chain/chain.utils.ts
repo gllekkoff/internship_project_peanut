@@ -45,10 +45,11 @@ export function redactUrls(message: string): string {
 }
 
 /** Maps a TransactionRequest to viem's call/estimateGas parameter shape. */
-export function toViemCallParams(tx: TransactionRequest) {
+export function toViemCallParams(tx: TransactionRequest, account?: Hex) {
   return {
     to: tx.to.value as Hex,
     value: tx.value.raw,
+    ...(account && { account }),
     ...(tx.data.length > 0 && {
       data: `0x${Buffer.from(tx.data).toString('hex')}` as Hex,
     }),

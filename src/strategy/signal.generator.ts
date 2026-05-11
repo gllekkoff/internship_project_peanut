@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { PRICE_SCALE } from '@/core/core.constants';
 import { makeLogger } from '@/core/core.logger';
-import type { Address, Token } from '@/core/core.types';
+import type { Token } from '@/core/core.types';
 import type { ChainClient } from '@/chain/chain.client';
 import type { ExchangeClient } from '@/exchange/cexClient/exchange.client';
 import type { OrderBook } from '@/exchange/cexClient/exchange.interfaces';
@@ -21,17 +21,21 @@ const log = makeLogger('Signal');
  */
 export class SignalGenerator {
   private readonly minSpreadBps: number;
-  private readonly tradeSizeUsd: bigint;
+  private readonly tradeSizeMin: bigint;
+  private readonly tradeSizeMax: bigint;
+  private readonly tradeSizeSteps: number;
   private readonly minProfit: bigint;
   private readonly maxPosition: bigint;
   private readonly signalTtlMs: number;
   private readonly cooldownMs: number;
   private readonly pairTokens: Map<string, readonly [Token, Token]> | undefined;
-  private readonly senderAddress: Address | undefined;
   private readonly swapGasUnits: bigint;
-  private readonly poolAddress: string | undefined;
   private readonly lastSignalTime: Map<string, number> = new Map();
+  private readonly lastLoggedPrices: Map<string, PriceLevels> = new Map();
   private gasCache: { value: bigint; ts: number } | null = null;
+
+  // 0.000001 in human price = 100 units at PRICE_SCALE (1e8)
+  private static readonly LOG_PRICE_TOLERANCE = 100n;
 
   constructor(
     private readonly exchangeClient: ExchangeClient,
@@ -42,22 +46,18 @@ export class SignalGenerator {
     private readonly chainClient?: ChainClient,
   ) {
     this.minSpreadBps = config.minSpreadBps ?? 50;
-    this.tradeSizeUsd = config.tradeSizeUsd ?? 18n * PRICE_SCALE;
+    const fixedSize = config.tradeSizeUsd ?? 18n * PRICE_SCALE;
+    this.tradeSizeMin = config.tradeSizeMin ?? fixedSize;
+    this.tradeSizeMax = config.tradeSizeMax ?? this.tradeSizeMin;
+    this.tradeSizeSteps = config.tradeSizeSteps ?? 5;
     this.minProfit = config.minProfit ?? 5n * PRICE_SCALE;
     this.maxPosition = config.maxPosition ?? 10_000n * PRICE_SCALE;
     this.signalTtlMs = config.signalTtlMs ?? 5_000;
     this.cooldownMs = config.cooldownMs ?? 2_000;
     this.pairTokens = config.pairTokens;
-    this.senderAddress = config.senderAddress;
     this.swapGasUnits = config.swapGasUnits ?? 150_000n;
-    this.poolAddress = config.poolAddress;
   }
 
-  /**
-   * Attempts to generate a signal for the given pair.
-   * Returns a Signal when an opportunity clears all fee and inventory checks, null otherwise.
-   * Pass `book` to skip the REST order book fetch — used when called from a WebSocket depth handler.
-   */
   async generate(pair: string, book?: OrderBook): Promise<Signal | null> {
     if (this.inCooldown(pair)) return null;
     const signal = await this.generateCore(pair, book);
@@ -79,7 +79,6 @@ export class SignalGenerator {
 
     const { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size } = prices;
 
-    // Float ratio — bigint division would truncate sub-integer spreads to zero on liquid pairs.
     const buyCexSellDexBps =
       cexAsk > 0n ? (Number(dexSellPrice - cexAsk) * 10_000) / Number(cexAsk) : 0;
     const buyDexSellCexBps =
@@ -101,21 +100,24 @@ export class SignalGenerator {
       cexPrice = cexBid;
       dexPrice = dexBuyPrice;
     } else {
-      this.logNoSignal(
-        pair,
-        cexBid,
-        cexAsk,
-        dexBuyPrice,
-        dexSellPrice,
-        size,
-        buyCexSellDexBps,
-        buyDexSellCexBps,
-      );
+      const current = { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size };
+      if (this.pricesChanged(pair, current)) {
+        this.lastLoggedPrices.set(pair, current);
+        this.logNoSignal(
+          pair,
+          cexBid,
+          cexAsk,
+          dexBuyPrice,
+          dexSellPrice,
+          size,
+          buyCexSellDexBps,
+          buyDexSellCexBps,
+        );
+      }
       return null;
     }
 
     const tradeValue = (size * cexPrice) / PRICE_SCALE;
-    // Gross PnL from actual price difference — avoids round-tripping through the float spreadBps.
     const grossPnl =
       direction === Direction.BUY_CEX_SELL_DEX
         ? (size * (dexPrice - cexPrice)) / PRICE_SCALE
@@ -125,7 +127,19 @@ export class SignalGenerator {
     const totalFee = this.fees.totalFee(tradeValue, liveGasCost);
     const netPnl = grossPnl - totalFee;
 
-    if (netPnl < this.minProfit) return null;
+    if (netPnl < this.minProfit) {
+      const current = { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size };
+      if (this.pricesChanged(pair, current)) {
+        this.lastLoggedPrices.set(pair, current);
+        const s = Number(PRICE_SCALE);
+        const fmt = (v: bigint) => `$${(Number(v) / s).toFixed(4)}`;
+        log.info(
+          `[UNPROFITABLE] ${pair}  ${direction}  spread=${spreadBps.toFixed(2)}bps` +
+            `  gross=${fmt(grossPnl)}  fees=${fmt(totalFee)}  net=${fmt(netPnl)}`,
+        );
+      }
+      return null;
+    }
 
     const [base, quote] = pair.split('/') as [string, string];
     const inventoryOk = this.checkInventory(direction, base, quote, size, cexPrice);
@@ -146,8 +160,10 @@ export class SignalGenerator {
       expectedGrossPnl: grossPnl,
       expectedFees: totalFee,
       expectedNetPnl: netPnl,
-      // Score = multiples of minimum profit; drives prioritisation when multiple signals are live.
-      score: Number(netPnl) / Number(this.minProfit),
+      score:
+        this.minProfit > 0n
+          ? Number(netPnl) / Number(this.minProfit)
+          : Number(netPnl) / Number(PRICE_SCALE),
       timestamp: now,
       expiry: new Date(now.getTime() + this.signalTtlMs),
       inventoryOk,
@@ -185,57 +201,99 @@ export class SignalGenerator {
   private async fetchPrices(pair: string, book?: OrderBook): Promise<PriceLevels | null> {
     try {
       const ob = book ?? (await this.exchangeClient.fetchOrderBook(pair, 5));
-
-      // Derive size from the top-of-book ask before walking — no hardcoded price assumptions.
       const topAsk = ob.bestAsk[0];
       if (topAsk === 0n) return null;
-      const size = (this.tradeSizeUsd * PRICE_SCALE) / topAsk;
-      const sizeNum = Number(size) / Number(PRICE_SCALE);
-
-      const analyzer = new OrderBookAnalyzer(ob);
-      const bidWalk = analyzer.walkTheBook('sell', sizeNum);
-      const askWalk = analyzer.walkTheBook('buy', sizeNum);
-
-      // Not enough depth on either side to fill the full trade — skip signal.
-      if (!bidWalk.fullyFilled || !askWalk.fullyFilled) return null;
-
-      const cexBid = bidWalk.avgPrice;
-      const cexAsk = askWalk.avgPrice;
-
-      let dexBuyPrice: bigint;
-      let dexSellPrice: bigint;
 
       const tokens = this.pairTokens?.get(pair);
-
-      if (this.pricingEngine !== null && tokens !== undefined && this.senderAddress !== undefined) {
-        const [baseToken, quoteToken] = tokens;
-
-        // Sell: send base → receive quote. dexSellPrice = quoteReceived / baseIn (PRICE_SCALE).
-        const baseAmountIn = (size * 10n ** BigInt(baseToken.decimals)) / PRICE_SCALE;
-        const quoteReceived = this.pricingEngine.getAmmQuote(baseToken, quoteToken, baseAmountIn);
-        const quoteReceivedScaled =
-          (quoteReceived * PRICE_SCALE) / 10n ** BigInt(quoteToken.decimals);
-        dexSellPrice = (quoteReceivedScaled * PRICE_SCALE) / size;
-
-        // Buy: send quote → receive base. Approximate quoteIn from CEX bid.
-        // dexBuyPrice = quoteIn / baseReceived (PRICE_SCALE).
-        const quoteAmountScaled = (size * cexBid) / PRICE_SCALE;
-        const quoteAmountIn =
-          (quoteAmountScaled * 10n ** BigInt(quoteToken.decimals)) / PRICE_SCALE;
-        const baseReceived = this.pricingEngine.getAmmQuote(quoteToken, baseToken, quoteAmountIn);
-        const baseReceivedScaled = (baseReceived * PRICE_SCALE) / 10n ** BigInt(baseToken.decimals);
-        dexBuyPrice =
-          baseReceivedScaled > 0n ? (quoteAmountScaled * PRICE_SCALE) / baseReceivedScaled : 0n;
-      } else {
+      if (this.pricingEngine === null || tokens === undefined) {
         throw new Error(
           `No DEX pricing available for ${pair} — pricingEngine or token config missing`,
         );
       }
 
-      return { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size };
+      return this.findBestPrices(ob, topAsk, tokens);
     } catch (e) {
       throw e instanceof Error ? e : new Error(`fetchPrices failed for ${pair}: ${String(e)}`);
     }
+  }
+
+  /** Returns N evenly-spaced USD trade sizes (at PRICE_SCALE) across [tradeSizeMin, tradeSizeMax]. */
+  private candidateSizes(): bigint[] {
+    if (this.tradeSizeMin === this.tradeSizeMax) return [this.tradeSizeMin];
+    const steps = Math.max(2, this.tradeSizeSteps);
+    const range = this.tradeSizeMax - this.tradeSizeMin;
+    return Array.from(
+      { length: steps },
+      (_, i) => this.tradeSizeMin + (range * BigInt(i)) / BigInt(steps - 1),
+    );
+  }
+
+  /** Pure sync: walks the CEX order book and queries the AMM for a given USD trade size. */
+  private computePricesAt(
+    ob: OrderBook,
+    sizeUsd: bigint,
+    topAsk: bigint,
+    tokens: readonly [Token, Token],
+  ): PriceLevels | null {
+    const size = (sizeUsd * PRICE_SCALE) / topAsk;
+    const sizeNum = Number(size) / Number(PRICE_SCALE);
+
+    const analyzer = new OrderBookAnalyzer(ob);
+    const bidWalk = analyzer.walkTheBook('sell', sizeNum);
+    const askWalk = analyzer.walkTheBook('buy', sizeNum);
+    if (!bidWalk.fullyFilled || !askWalk.fullyFilled) return null;
+
+    const cexBid = bidWalk.avgPrice;
+    const cexAsk = askWalk.avgPrice;
+    const [baseToken, quoteToken] = tokens;
+
+    const baseAmountIn = (size * 10n ** BigInt(baseToken.decimals)) / PRICE_SCALE;
+    const quoteReceived = this.pricingEngine!.getAmmQuote(baseToken, quoteToken, baseAmountIn);
+    const quoteReceivedScaled = (quoteReceived * PRICE_SCALE) / 10n ** BigInt(quoteToken.decimals);
+    const dexSellPrice = size > 0n ? (quoteReceivedScaled * PRICE_SCALE) / size : 0n;
+
+    const quoteAmountScaled = (size * cexBid) / PRICE_SCALE;
+    const quoteAmountIn = (quoteAmountScaled * 10n ** BigInt(quoteToken.decimals)) / PRICE_SCALE;
+    const baseReceived = this.pricingEngine!.getAmmQuote(quoteToken, baseToken, quoteAmountIn);
+    const baseReceivedScaled = (baseReceived * PRICE_SCALE) / 10n ** BigInt(baseToken.decimals);
+    const dexBuyPrice =
+      baseReceivedScaled > 0n ? (quoteAmountScaled * PRICE_SCALE) / baseReceivedScaled : 0n;
+
+    return { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size };
+  }
+
+  /** Static fee estimate (no gas fetch) used only for comparing candidate sizes in the sweep. */
+  private estimateNetPnl(prices: PriceLevels): bigint {
+    const { cexBid, cexAsk, dexBuyPrice, dexSellPrice, size } = prices;
+    const buyCexGross =
+      dexSellPrice > cexAsk ? (size * (dexSellPrice - cexAsk)) / PRICE_SCALE : -1n;
+    const buyDexGross = cexBid > dexBuyPrice ? (size * (cexBid - dexBuyPrice)) / PRICE_SCALE : -1n;
+    const grossPnl = buyCexGross > buyDexGross ? buyCexGross : buyDexGross;
+    if (grossPnl <= 0n) return -1n;
+    const tradeValue = (size * cexAsk) / PRICE_SCALE;
+    return grossPnl - this.fees.totalFee(tradeValue);
+  }
+
+  /** Sweeps all candidate USD sizes and returns the PriceLevels with the highest estimated net PnL. */
+  private findBestPrices(
+    ob: OrderBook,
+    topAsk: bigint,
+    tokens: readonly [Token, Token],
+  ): PriceLevels | null {
+    let best: PriceLevels | null = null;
+    let bestPnl = 0n;
+
+    for (const sizeUsd of this.candidateSizes()) {
+      const prices = this.computePricesAt(ob, sizeUsd, topAsk, tokens);
+      if (prices === null) continue;
+      const pnl = this.estimateNetPnl(prices);
+      if (best === null || pnl > bestPnl) {
+        bestPnl = pnl;
+        best = prices;
+      }
+    }
+
+    return best;
   }
 
   /**
@@ -266,6 +324,19 @@ export class SignalGenerator {
     }
   }
 
+  private pricesChanged(pair: string, current: PriceLevels): boolean {
+    const prev = this.lastLoggedPrices.get(pair);
+    if (!prev) return true;
+    const t = SignalGenerator.LOG_PRICE_TOLERANCE;
+    const diff = (a: bigint, b: bigint) => (a > b ? a - b : b - a);
+    return (
+      diff(current.cexBid, prev.cexBid) > t ||
+      diff(current.cexAsk, prev.cexAsk) > t ||
+      diff(current.dexBuyPrice, prev.dexBuyPrice) > t ||
+      diff(current.dexSellPrice, prev.dexSellPrice) > t
+    );
+  }
+
   private logNoSignal(
     pair: string,
     cexBid: bigint,
@@ -280,25 +351,31 @@ export class SignalGenerator {
     const [base = ''] = pair.split('/');
     const sizeNum = Number(size) / s;
 
+    const isBuyCex = buyCexSellDexBps >= buyDexSellCexBps;
+    const bestBps = isBuyCex ? buyCexSellDexBps : buyDexSellCexBps;
+    const bestDir = isBuyCex ? 'buyCexSellDex' : 'buyDexSellCex';
+
+    const refPrice = isBuyCex ? cexAsk : cexBid;
+    const tradeValue = (size * refPrice) / PRICE_SCALE;
+    const grossPnl = isBuyCex
+      ? (size * (dexSellPrice - cexAsk)) / PRICE_SCALE
+      : (size * (cexBid - dexBuyPrice)) / PRICE_SCALE;
+    const approxNet = grossPnl - this.fees.totalFee(tradeValue);
+
     const px = (v: bigint) => (Number(v) / s).toFixed(6);
     const bps = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}bps`;
-
-    const cexMid = (cexBid + cexAsk) / 2n;
-    const cexSpreadBps = cexMid > 0n ? (Number(cexAsk - cexBid) * 10_000) / Number(cexMid) : 0;
+    const fmt$ = (v: bigint) =>
+      `${v >= 0n ? '+' : '-'}$${(Number(v < 0n ? -v : v) / s).toFixed(3)}`;
 
     const dexMid = (dexBuyPrice + dexSellPrice) / 2n;
-    const dexSpreadBps =
-      dexMid > 0n ? (Number(dexBuyPrice - dexSellPrice) * 10_000) / Number(dexMid) : 0;
-
-    const pool = this.poolAddress ? `  pool=${this.poolAddress}` : '';
-    const warn = dexSpreadBps > 500 ? '  [dex_spread_extremely_wide]' : '';
+    const warn =
+      dexMid > 0n && (Number(dexBuyPrice - dexSellPrice) * 10_000) / Number(dexMid) > 500
+        ? '  [dex_spread_extremely_wide]'
+        : '';
 
     log.info(
-      `[NO_SIGNAL] ${pair}  size=${sizeNum.toFixed(4)} ${base}  thr=${this.minSpreadBps}bps\n` +
-        `\tcex  bid=${px(cexBid)}  ask=${px(cexAsk)}  spread=${bps(cexSpreadBps)}\n` +
-        `\tdex  sell=${px(dexSellPrice)}  buy=${px(dexBuyPrice)}  spread=${bps(dexSpreadBps)}\n` +
-        `\t${pool}${warn}\n` +
-        `\tbuyCexSellDex=${bps(buyCexSellDexBps)}  buyDexSellCex=${bps(buyDexSellCexBps)}`,
+      `[NO_SIGNAL] ${pair}  ${sizeNum.toFixed(4)} ${base}  arb=${bps(bestBps)} (${bestDir})  net≈${fmt$(approxNet)}  thr=${this.minSpreadBps}bps${warn}\n` +
+        `\t\t\t\t\tcex  bid=${px(cexBid)}  ask=${px(cexAsk)}  |  dex  sell=${px(dexSellPrice)}  buy=${px(dexBuyPrice)}`,
     );
   }
 }

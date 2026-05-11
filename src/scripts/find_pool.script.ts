@@ -1,15 +1,6 @@
 #!/usr/bin/env tsx
-/**
- * Looks up the V2 pair address for a BASE_TOKEN/QUOTE_TOKEN pair across known factories.
- * Prints reserves and implied price for any pool found.
- *
- * Usage:
- *   npx tsx src/scripts/find_pool.script.ts
- *
- * Required env: CHAIN_ID, MAINNET_RPC_URL, BASE_TOKEN, QUOTE_TOKEN
- * Optional env: FACTORY — checked first, then Uniswap V2 and SushiSwap V2 defaults
- */
 import 'dotenv/config';
+import { resolveToken } from '@/integration/arbBot/arb_bot.utils';
 import {
   createPublicClient,
   erc20Abi,
@@ -70,12 +61,6 @@ function optionalEnv(name: string): string | null {
   return process.env[name] ?? null;
 }
 
-function requireAddress(name: string): ViemAddress {
-  const value = requireEnv(name);
-  if (!isAddress(value)) throw new Error(`${name} is not a valid EVM address: ${value}`);
-  return getAddress(value);
-}
-
 function optionalAddress(name: string): ViemAddress | null {
   const value = optionalEnv(name);
   if (!value) return null;
@@ -131,11 +116,36 @@ async function getTokenInfo(address: ViemAddress): Promise<TokenInfo> {
   return { address, symbol, decimals };
 }
 
+function parseTokenArgs(argv: string[]): { base: ViemAddress; quote: ViemAddress } {
+  let base: string | undefined;
+  let quote: string | undefined;
+  const positional: string[] = [];
+
+  for (let i = 2; i < argv.length; i++) {
+    if ((argv[i] === '-B' || argv[i] === '--base-token') && argv[i + 1]) {
+      base = resolveToken(argv[++i]!);
+    } else if ((argv[i] === '-Q' || argv[i] === '--quote-token') && argv[i + 1]) {
+      quote = resolveToken(argv[++i]!);
+    } else if (argv[i] && !argv[i]!.startsWith('-')) {
+      positional.push(argv[i]!);
+    }
+  }
+
+  if (positional[0] && !base) base = resolveToken(positional[0]);
+  if (positional[1] && !quote) quote = resolveToken(positional[1]);
+
+  base ??= requireEnv('BASE_TOKEN');
+  quote ??= requireEnv('QUOTE_TOKEN');
+
+  if (!isAddress(base)) throw new Error(`Invalid base token address: ${base}`);
+  if (!isAddress(quote)) throw new Error(`Invalid quote token address: ${quote}`);
+  return { base: getAddress(base), quote: getAddress(quote) };
+}
+
 const chainId = Number(requireEnv('CHAIN_ID'));
 const chain = resolveChain(chainId);
 const rpcUrl = resolveRpcUrl();
-const baseToken = requireAddress('BASE_TOKEN');
-const quoteToken = requireAddress('QUOTE_TOKEN');
+const { base: baseToken, quote: quoteToken } = parseTokenArgs(process.argv);
 const factories = getFactories();
 
 const client = createPublicClient({

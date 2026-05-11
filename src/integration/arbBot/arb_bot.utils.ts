@@ -1,9 +1,24 @@
+import 'dotenv/config';
 import { ArbRecord, TradeLeg } from '@/inventory/pnl/pnl.interfaces';
 import { Venue } from '@/inventory/tracker/tracker.interfaces';
 import { Direction, Signal } from '@/strategy/signal.interfaces';
 import type { ExecutionContext } from '@/executor/engine/engine.interfaces';
 
-/** Builds an ArbRecord from a signal for dry-run PnL tracking. */
+export const TOKEN_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(process.env)
+    .filter((entry): entry is [string, string] => /^0x[0-9a-fA-F]{40}$/.test(entry[1] ?? ''))
+    .map(([k, v]) => [k.toUpperCase(), v]),
+);
+
+export function resolveToken(value: string): string {
+  const upper = value.toUpperCase();
+  if (TOKEN_MAP[upper]) return TOKEN_MAP[upper]!;
+  if (/^0x[0-9a-fA-F]{40}$/.test(value)) return value;
+  throw new Error(
+    `Unknown token "${value}". Add ${upper}=0x... to your .env or pass a full address.`,
+  );
+}
+
 export function signalToArbRecord(signal: Signal): ArbRecord {
   const [, quote = 'USDT'] = signal.pair.split('/');
   const isBuyCex = signal.direction === Direction.BUY_CEX_SELL_DEX;
@@ -35,7 +50,6 @@ export function signalToArbRecord(signal: Signal): ArbRecord {
   return new ArbRecord(signal.signalId, signal.timestamp, buyLeg, sellLeg);
 }
 
-/** Converts a completed ExecutionContext into an ArbRecord the PnLEngine can track. */
 export function executionToArbRecord(ctx: ExecutionContext): ArbRecord {
   const { signal } = ctx;
   const [, quote = 'USDT'] = signal.pair.split('/');
@@ -44,7 +58,6 @@ export function executionToArbRecord(ctx: ExecutionContext): ArbRecord {
   const buyVenue = isBuyCex ? Venue.BINANCE : Venue.WALLET;
   const sellVenue = isBuyCex ? Venue.WALLET : Venue.BINANCE;
 
-  // Route fill data to buy/sell based on which leg executed at the buy venue.
   const buyIsLeg1 = (isBuyCex && ctx.leg1Venue === 'cex') || (!isBuyCex && ctx.leg1Venue === 'dex');
   const buyFillSize = buyIsLeg1 ? ctx.leg1FillSize : ctx.leg2FillSize;
   const buyFillPrice = buyIsLeg1 ? ctx.leg1FillPrice : ctx.leg2FillPrice;

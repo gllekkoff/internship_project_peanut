@@ -27,6 +27,8 @@ import {
   DEFAULT_LEG1_TIMEOUT_MS,
   DEFAULT_LEG2_TIMEOUT_MS,
   DEFAULT_MIN_FILL_RATIO,
+  UNWIND_SLIPPAGE_BPS,
+  DEX_SWAP_GAS_LIMIT,
 } from '@/executor/engine/engine.constants';
 import { CircuitBreaker, ReplayProtection } from '@/executor/recovery/recovery.service';
 import {
@@ -46,7 +48,6 @@ export class Executor {
   private readonly useFlashbots: boolean;
   private readonly simulationMode: boolean;
   private readonly dexSlippageBps: bigint;
-  private readonly gasBufferMultiplier: number;
   private readonly router: Address;
   private readonly pairTokens: Map<string, readonly [Token, Token]> | undefined;
   private readonly circuitBreaker = new CircuitBreaker();
@@ -69,10 +70,19 @@ export class Executor {
     this.useFlashbots = config.useFlashbots ?? true;
     this.simulationMode = config.simulationMode ?? true;
     this.dexSlippageBps = config.dexSlippageBps ?? 50n;
-    this.gasBufferMultiplier = config.gasBufferMultiplier ?? 1.25;
     this.router = config.router ?? UNISWAP_V2_ROUTER;
     this.pairTokens = config.pairTokens;
     this.tradingRules = config.tradingRules ?? new Map();
+  }
+
+  /** True when the circuit breaker is open and execution is blocked. */
+  isCircuitBreakerOpen(): boolean {
+    return this.circuitBreaker.isOpen();
+  }
+
+  /** Milliseconds until the circuit breaker auto-resets; 0 when closed. */
+  circuitBreakerResetMs(): number {
+    return this.circuitBreaker.timeUntilResetMs();
   }
 
   async execute(signal: Signal): Promise<ExecutionContext> {
@@ -92,8 +102,6 @@ export class Executor {
       if (Date.now() >= signal.expiry.getTime()) reasons.push('expired');
       if (!signal.inventoryOk) reasons.push('inventory insufficient at signal time');
       if (!signal.withinLimits) reasons.push('exceeds max position');
-      if (signal.expectedNetPnl <= 0n) reasons.push('net PnL non-positive');
-      if (signal.score <= 0) reasons.push('score zero');
       return this.fail(ctx, `Signal invalid: ${reasons.join(', ') || 'unknown'}`);
     }
 
@@ -200,7 +208,7 @@ export class Executor {
       this.leg2TimeoutMs,
     );
     if (!leg1) return this.fail(ctx, 'DEX timeout');
-    if (!leg1.success) return this.fail(ctx, 'DEX failed (no cost via Flashbots)');
+    if (!leg1.success) return this.fail(ctx, `DEX leg failed: ${leg1.error ?? 'unknown error'}`);
 
     ctx.leg1FillPrice = leg1.price;
     ctx.leg1FillSize = leg1.filled;
@@ -312,7 +320,12 @@ export class Executor {
     const [tokenIn, tokenOut] = this.resolvePairTokens(signal);
     const senderAddress = new Address(this.wallet.getAddress());
 
-    const amountInNative = (size * 10n ** BigInt(tokenIn.decimals)) / PRICE_SCALE;
+    // For BUY_DEX_SELL_CEX: tokenIn is quote (USDC), size is base (ARB) — convert to USDC cost.
+    // For BUY_CEX_SELL_DEX: tokenIn is base (ARB), size is base — direct conversion.
+    const amountInNative =
+      signal.direction === Direction.BUY_DEX_SELL_CEX
+        ? (size * signal.dexPrice * 10n ** BigInt(tokenIn.decimals)) / (PRICE_SCALE * PRICE_SCALE)
+        : (size * 10n ** BigInt(tokenIn.decimals)) / PRICE_SCALE;
 
     const gasPrice = await this.chainClient.getGasPrice();
     const quote = await this.pricingEngine.getQuote(
@@ -352,11 +365,19 @@ export class Executor {
     const receipt = await new TransactionBuilder(sendClient, this.wallet)
       .to(this.router)
       .data(Buffer.from(calldata.slice(2), 'hex'))
-      .withGasEstimate(this.gasBufferMultiplier)
+      .gasLimit(DEX_SWAP_GAS_LIMIT)
       .withGasPrice('medium')
       .sendAndWait(Math.ceil(this.leg2TimeoutMs / 1000));
 
     const amountOutNative = this.parseSwapOutput(receipt.logs, tokenOut, senderAddress);
+    if (amountOutNative === 0n) {
+      return {
+        success: false,
+        price: 0n,
+        filled: 0n,
+        error: `DEX swap confirmed but no Transfer log found for ${tokenOut.symbol} — output amount unknown`,
+      };
+    }
 
     const [quoteAmt, quoteDecimals, baseAmt, baseDecimals] =
       signal.direction === Direction.BUY_DEX_SELL_CEX
@@ -460,12 +481,21 @@ export class Executor {
     const senderAddress = new Address(this.wallet.getAddress());
     const deadline = BigInt(Math.floor(Date.now() / 1000)) + DEFAULT_DEADLINE_OFFSET;
 
+    // Floor based on fill price — accepts up to UNWIND_SLIPPAGE_BPS (5%) worse than entry.
+    // This prevents a MEV sandwich from draining the position on emergency exit.
+    const expectedOutNative =
+      signal.direction === Direction.BUY_DEX_SELL_CEX
+        ? (fillSize * fillPrice * 10n ** BigInt(unwindTokenOut.decimals)) /
+          (PRICE_SCALE * PRICE_SCALE)
+        : (fillSize * 10n ** BigInt(unwindTokenOut.decimals)) / PRICE_SCALE;
+    const amountOutMin = (expectedOutNative * (10_000n - UNWIND_SLIPPAGE_BPS)) / 10_000n;
+
     const calldata = encodeFunctionData({
       abi: ROUTER_ABI,
       functionName: 'swapExactTokensForTokens',
       args: [
         amountInNative,
-        0n, // amountOutMin=0: accept any price on emergency unwind
+        amountOutMin,
         [unwindTokenIn.address.value as Hex, unwindTokenOut.address.value as Hex],
         senderAddress.value as Hex,
         deadline,
@@ -478,7 +508,7 @@ export class Executor {
       await new TransactionBuilder(sendClient, this.wallet)
         .to(this.router)
         .data(Buffer.from(calldata.slice(2), 'hex'))
-        .withGasEstimate(this.gasBufferMultiplier)
+        .gasLimit(DEX_SWAP_GAS_LIMIT)
         .withGasPrice('high')
         .sendAndWait(Math.ceil(this.leg2TimeoutMs / 1000));
     } catch (e) {

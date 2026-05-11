@@ -99,8 +99,9 @@ export class TransactionBuilder {
         this.client.chainId,
       );
 
+      const senderHex = this.wallet.getAddress() as Hex;
       const [estimatedGas, gasPrice] = await Promise.all([
-        this._estimateGas ? this.client.estimateGas(partialTx) : Promise.resolve(null),
+        this._estimateGas ? this.client.estimateGas(partialTx, senderHex) : Promise.resolve(null),
         this._fetchGasPrice ? this.client.getGasPrice() : Promise.resolve(null),
       ]);
 
