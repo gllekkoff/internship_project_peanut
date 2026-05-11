@@ -22,14 +22,12 @@
 - Trading in testnet/low-risk mode with `MIN_PROFIT_USD = -0.02` to allow small loss trades for testing
 
 ### Problems Encountered
-- **Camelot ABI mismatch**: Initially used 6-arg `swapExactTokensForTokens` (with referrer) — the router at `0x4752ba5...` only supports standard 5-arg Uniswap V2 interface. Fixed by reverting ABI.
 - **Fork simulator approval issue**: `simulateRoute` called `swapExactTokensForTokens` via eth_call on Anvil fork which doesn't have token approvals. Fixed by switching to `getAmountsOut` (view-only, no approval needed).
 - **estimateGas timing revert**: Pool state shifts between `getQuote` and `estimateGas` causing intermittent reverts. Fixed by using fixed 200k gas limit instead.
 - **Flashbots relay wrong chain**: `useFlashbots: true` was routing transactions to `relay.flashbots.net` (mainnet only). Fixed: disabled for Arbitrum.
 - **MIN_NOTIONAL breach**: Trade size $5 × ARB price ≈ $4.99, just below Binance's $5 minimum. Fixed by raising `TRADE_SIZE_USD` to $6.
 
 ### Changes Made
-- `fork.constants.ts`: Reverted `swapExactTokensForTokens` ABI to 5-arg (no referrer)
 - `fork.service.ts`: `simulateRoute` now uses `getAmountsOut` instead of simulating full swap
 - `engine.types.ts`: Quote tolerance raised from 10 bps → 100 bps
 - `engine.constants.ts`: Added `DEX_SWAP_GAS_LIMIT = 200_000n`; executor uses fixed gas instead of `estimateGas`

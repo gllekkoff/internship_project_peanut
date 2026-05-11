@@ -118,7 +118,7 @@ Also lost 1 protitable trade because of `getQuote` issue with tolerance.
 
 Perpetual futures pay a funding rate every 8 hours to keep their price close to spot. When funding is positive, shorts receive payment from longs.
 
-**The trade:** Buy ARB spot + short ARB perp on GMX or Hyperliquid. The two positions cancel out price risk - you don't care if ARB goes up or down. The profit is the funding payment collected every 8 hours.
+**The trade:** Buy ARB spot + short ARB perp. The two positions cancel out price risk - you don't care if ARB goes up or down. The profit is the funding payment collected every 8 hours.
 
 **Why it connects to what I built:** The inventory tracker, multi-venue balances, and two-leg executor are already most of what's needed. The main change is a new signal source (funding rate instead of order book spread) and a margin/liquidation risk model.
 
